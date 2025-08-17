@@ -1,4 +1,4 @@
-// lib/data/models/webcam_config_model.dart
+// lib/data/models/webcam_config_model.dart - Fixed version
 class WebcamConfigModel {
   final String ipAddress;
   final int port;
@@ -27,12 +27,12 @@ class WebcamConfigModel {
   
   factory WebcamConfigModel.fromJson(Map<String, dynamic> json) {
     return WebcamConfigModel(
-      ipAddress: json['ip_address'] ?? '',
-      port: json['port'] ?? 8080,
-      username: json['username'] ?? '',
-      password: json['password'] ?? '',
-      streamPath: json['stream_path'] ?? '/video',
-      isConnected: json['is_connected'] ?? false,
+      ipAddress: json['ip_address']?.toString() ?? '',
+      port: json['port'] as int? ?? 8080,
+      username: json['username']?.toString() ?? '',
+      password: json['password']?.toString() ?? '',
+      streamPath: json['stream_path']?.toString() ?? '/video',
+      isConnected: json['is_connected'] as bool? ?? false,
     );
   }
 
@@ -147,4 +147,16 @@ class WebcamConfigModel {
       return null;
     }
   }
+
+  /// Safe getter สำหรับ IP address
+  String get safeIpAddress => ipAddress.isNotEmpty ? ipAddress : '192.168.1.100';
+  
+  /// Safe getter สำหรับ port
+  int get safePort => port > 0 && port <= 65535 ? port : 8080;
+  
+  /// Safe getter สำหรับ username
+  String get safeUsername => username;
+  
+  /// Safe getter สำหรับ password
+  String get safePassword => password;
 }
