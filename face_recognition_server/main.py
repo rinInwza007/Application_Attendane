@@ -1,38 +1,55 @@
-# Face Recognition Server with FastAPI
-# Requirements: fastapi, uvicorn, opencv-python, face-recognition, pillow, python-multipart
-
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+# Improved Face Recognition Server with Supabase Integration
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel
 import cv2
 import face_recognition
 import numpy as np
 import io
 import base64
 from PIL import Image
-import sqlite3
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from dotenv import load_dotenv
 import os
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
 
-# Get configuration
+# Configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-FACE_THRESHOLD = float(os.getenv("FACE_VERIFICATION_THRESHOLD", 0.6))
+FACE_THRESHOLD = float(os.getenv("FACE_VERIFICATION_THRESHOLD", 0.7))
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
+
+# Supabase setup
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in environment variables")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Face Recognition API", version="1.0.0")
+app = FastAPI(
+    title="Attendance Plus Face Recognition API",
+    description="Face Recognition Server for Attendance System",
+    version="2.0.0"
+)
 
 # CORS middleware
 app.add_middleware(
@@ -43,141 +60,224 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database setup
-def init_database():
-    conn = sqlite3.connect('face_recognition.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS face_embeddings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT UNIQUE NOT NULL,
-            student_email TEXT NOT NULL,
-            embedding BLOB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+# Security
+security = HTTPBearer(auto_error=False)
 
-# Initialize database on startup
+# Pydantic models
+class AttendanceCheckInRequest(BaseModel):
+    session_id: str
+    student_email: str
+    webcam_config: Optional[Dict[str, Any]] = None
+
+class AttendanceSessionRequest(BaseModel):
+    class_id: str
+    teacher_email: str
+    duration_hours: int = 2
+    on_time_limit_minutes: int = 30
+
+class WebcamCaptureRequest(BaseModel):
+    ip_address: str
+    port: int = 8080
+    username: Optional[str] = ""
+    password: Optional[str] = ""
+
+# Custom exceptions
+class FaceRecognitionException(Exception):
+    def __init__(self, message: str, error_code: str = None):
+        self.message = message
+        self.error_code = error_code
+        super().__init__(self.message)
+
+@app.exception_handler(FaceRecognitionException)
+async def face_recognition_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=400,
+        content={"detail": exc.message, "error_code": exc.error_code}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+
+# Startup event
 @app.on_event("startup")
 async def startup_event():
-    init_database()
-    logger.info("Face Recognition Server started successfully")
+    logger.info("🚀 Face Recognition Server starting...")
+    
+    # Test Supabase connection
+    try:
+        result = supabase.table('users').select("count", count='exact').execute()
+        logger.info("✅ Supabase connection successful")
+    except Exception as e:
+        logger.warning(f"⚠️ Supabase connection warning: {e}")
+    
+    logger.info("✅ Server started successfully")
 
-# Health check endpoint
+# Health endpoints
 @app.get("/")
 async def root():
     return {
-        "message": "Face Recognition Server",
-        "version": "1.0.0",
+        "message": "Attendance Plus Face Recognition API",
+        "version": "2.0.0",
         "status": "running",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "health": "/health",
+            "face_register": "/api/face/register",
+            "face_verify": "/api/face/verify",
+            "webcam_capture": "/api/webcam/capture",
+            "attendance_checkin": "/api/attendance/checkin",
+            "session_create": "/api/attendance/session/create"
+        }
     }
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    try:
+        # Test face_recognition library
+        test_array = np.zeros((100, 100, 3), dtype=np.uint8)
+        face_recognition.face_locations(test_array)
+        
+        # Test Supabase
+        supabase.table('users').select("count", count='exact').execute()
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "services": {
+                "face_recognition": "ok",
+                "supabase": "ok"
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
 # Helper functions
-def process_image(image_file: UploadFile) -> tuple:
+def validate_image(image_file: UploadFile) -> None:
+    """Validate uploaded image file"""
+    if not image_file.content_type.startswith('image/'):
+        raise FaceRecognitionException("File must be an image", "INVALID_FILE_TYPE")
+    
+    # Check file size (10MB limit)
+    if hasattr(image_file, 'size') and image_file.size > 10 * 1024 * 1024:
+        raise FaceRecognitionException("Image file too large (max 10MB)", "FILE_TOO_LARGE")
+
+def process_face_image(image_file: UploadFile) -> tuple:
     """Process uploaded image and extract face encoding"""
     try:
-        # Read image
+        validate_image(image_file)
+        
+        # Read and convert image
         image_data = image_file.file.read()
         image = Image.open(io.BytesIO(image_data))
         
-        # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Convert to numpy array
         image_array = np.array(image)
         
-        # Find face locations
-        face_locations = face_recognition.face_locations(image_array)
+        # Resize if too large
+        height, width = image_array.shape[:2]
+        if width > 1024 or height > 1024:
+            scale = min(1024/width, 1024/height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            image_array = cv2.resize(image_array, (new_width, new_height))
+        
+        # Detect faces
+        face_locations = face_recognition.face_locations(image_array, model="hog")
         
         if len(face_locations) == 0:
-            raise HTTPException(status_code=400, detail="No face detected in the image")
+            raise FaceRecognitionException("No face detected in image", "NO_FACE_DETECTED")
         
         if len(face_locations) > 1:
-            raise HTTPException(status_code=400, detail="Multiple faces detected. Please ensure only one face is visible")
+            raise FaceRecognitionException("Multiple faces detected", "MULTIPLE_FACES")
         
         # Get face encoding
-        face_encodings = face_recognition.face_encodings(image_array, face_locations)
+        face_encodings = face_recognition.face_encodings(image_array, face_locations, num_jitters=2)
         
         if len(face_encodings) == 0:
-            raise HTTPException(status_code=400, detail="Could not encode face from the image")
+            raise FaceRecognitionException("Could not encode face", "ENCODING_FAILED")
         
         return face_encodings[0], face_locations[0]
         
+    except FaceRecognitionException:
+        raise
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+        raise FaceRecognitionException(f"Image processing failed: {str(e)}", "PROCESSING_ERROR")
 
-def save_face_embedding(student_id: str, student_email: str, encoding: np.ndarray) -> bool:
-    """Save face embedding to database"""
+def save_face_to_supabase(student_id: str, student_email: str, encoding: np.ndarray) -> bool:
+    """Save face embedding to Supabase"""
     try:
-        conn = sqlite3.connect('face_recognition.db')
-        cursor = conn.cursor()
+        # Convert encoding to JSON-serializable format
+        embedding_json = encoding.tolist()
         
-        # Convert encoding to bytes
-        encoding_bytes = encoding.tobytes()
+        # Calculate quality score (simplified)
+        quality_score = np.linalg.norm(encoding)
         
-        # Insert or update face embedding
-        cursor.execute('''
-            INSERT OR REPLACE INTO face_embeddings 
-            (student_id, student_email, embedding, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (student_id, student_email, encoding_bytes))
+        face_data = {
+            'student_id': student_id,
+            'face_embedding_json': json.dumps(embedding_json),
+            'face_quality': float(quality_score),
+            'is_active': True,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
         
-        conn.commit()
-        conn.close()
+        # Upsert face embedding
+        result = supabase.table('student_face_embeddings').upsert(face_data).execute()
         
+        logger.info(f"Face data saved for student: {student_id}")
         return True
         
     except Exception as e:
-        logger.error(f"Error saving face embedding: {str(e)}")
+        logger.error(f"Error saving to Supabase: {str(e)}")
         return False
 
-def get_face_embedding(student_id: str) -> Optional[np.ndarray]:
-    """Retrieve face embedding from database"""
+def get_face_from_supabase(student_id: str) -> Optional[np.ndarray]:
+    """Retrieve face embedding from Supabase"""
     try:
-        conn = sqlite3.connect('face_recognition.db')
-        cursor = conn.cursor()
+        result = supabase.table('student_face_embeddings').select('face_embedding_json').eq('student_id', student_id).eq('is_active', True).single().execute()
         
-        cursor.execute(
-            'SELECT embedding FROM face_embeddings WHERE student_id = ?',
-            (student_id,)
-        )
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            # Convert bytes back to numpy array
-            encoding = np.frombuffer(result[0], dtype=np.float64)
-            return encoding
+        if result.data:
+            embedding_json = json.loads(result.data['face_embedding_json'])
+            return np.array(embedding_json, dtype=np.float64)
         
         return None
         
     except Exception as e:
-        logger.error(f"Error retrieving face embedding: {str(e)}")
+        logger.error(f"Error retrieving from Supabase: {str(e)}")
         return None
 
-def calculate_face_similarity(encoding1: np.ndarray, encoding2: np.ndarray) -> float:
-    """Calculate similarity between two face encodings"""
+def calculate_similarity(encoding1: np.ndarray, encoding2: np.ndarray) -> float:
+    """Calculate face similarity using multiple metrics"""
     try:
-        # Calculate Euclidean distance
-        distance = np.linalg.norm(encoding1 - encoding2)
+        # Euclidean distance
+        euclidean_distance = np.linalg.norm(encoding1 - encoding2)
         
-        # Convert distance to similarity (lower distance = higher similarity)
-        similarity = max(0, 1 - distance)
+        # Cosine similarity
+        dot_product = np.dot(encoding1, encoding2)
+        norm_a = np.linalg.norm(encoding1)
+        norm_b = np.linalg.norm(encoding2)
         
-        return similarity
+        if norm_a == 0 or norm_b == 0:
+            cosine_similarity = 0
+        else:
+            cosine_similarity = dot_product / (norm_a * norm_b)
+        
+        # Combined score (weighted average)
+        distance_score = max(0, 1 - euclidean_distance)
+        final_score = (distance_score * 0.7) + (cosine_similarity * 0.3)
+        
+        return float(np.clip(final_score, 0, 1))
         
     except Exception as e:
         logger.error(f"Error calculating similarity: {str(e)}")
@@ -191,41 +291,37 @@ async def register_face(
     student_id: str = Form(...),
     student_email: str = Form(...)
 ):
-    """Register a new face for a student"""
+    """Register face for a student"""
     try:
         logger.info(f"Registering face for student: {student_id}")
         
-        # Validate file type
-        if not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
+        # Process image
+        face_encoding, face_location = process_face_image(file)
         
-        # Process image and extract face encoding
-        face_encoding, face_location = process_image(file)
-        
-        # Save to database
-        success = save_face_embedding(student_id, student_email, face_encoding)
+        # Save to Supabase
+        success = save_face_to_supabase(student_id, student_email, face_encoding)
         
         if not success:
             raise HTTPException(status_code=500, detail="Failed to save face data")
-        
-        logger.info(f"Face registered successfully for student: {student_id}")
         
         return {
             "success": True,
             "message": "Face registered successfully",
             "student_id": student_id,
+            "student_email": student_email,
             "face_location": {
                 "top": int(face_location[0]),
                 "right": int(face_location[1]),
                 "bottom": int(face_location[2]),
                 "left": int(face_location[3])
-            }
+            },
+            "timestamp": datetime.now().isoformat()
         }
         
-    except HTTPException:
-        raise
+    except FaceRecognitionException as e:
+        raise HTTPException(status_code=400, detail=e.message)
     except Exception as e:
-        logger.error(f"Error in register_face: {str(e)}")
+        logger.error(f"Registration error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 @app.post("/api/face/verify")
@@ -233,223 +329,225 @@ async def verify_face(
     file: UploadFile = File(...),
     student_id: str = Form(...)
 ):
-    """Verify a face against registered data"""
+    """Verify face against stored data"""
     try:
         logger.info(f"Verifying face for student: {student_id}")
         
-        # Validate file type
-        if not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
-        
-        # Get stored face encoding
-        stored_encoding = get_face_embedding(student_id)
-        
+        # Get stored encoding
+        stored_encoding = get_face_from_supabase(student_id)
         if stored_encoding is None:
-            raise HTTPException(status_code=404, detail="No face data found for this student")
+            raise HTTPException(status_code=404, detail="No face data found for student")
         
-        # Process uploaded image
-        current_encoding, face_location = process_image(file)
+        # Process current image
+        current_encoding, face_location = process_face_image(file)
         
         # Calculate similarity
-        similarity = calculate_face_similarity(stored_encoding, current_encoding)
+        similarity = calculate_similarity(stored_encoding, current_encoding)
+        verified = similarity >= FACE_THRESHOLD
         
-        # Determine if verification passed (threshold: 0.6)
-        threshold = 0.6
-        verified = similarity >= threshold
-        
-        logger.info(f"Face verification for {student_id}: similarity={similarity:.3f}, verified={verified}")
+        logger.info(f"Verification result: similarity={similarity:.3f}, verified={verified}")
         
         return {
             "success": True,
             "verified": verified,
-            "similarity": float(similarity),
-            "threshold": threshold,
+            "similarity": similarity,
+            "threshold": FACE_THRESHOLD,
             "student_id": student_id,
-            "message": "Face verified successfully" if verified else "Face verification failed"
+            "confidence": "high" if similarity > 0.8 else "medium" if similarity > 0.6 else "low",
+            "timestamp": datetime.now().isoformat()
         }
         
-    except HTTPException:
-        raise
+    except FaceRecognitionException as e:
+        raise HTTPException(status_code=400, detail=e.message)
     except Exception as e:
-        logger.error(f"Error in verify_face: {str(e)}")
+        logger.error(f"Verification error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
 
 @app.post("/api/webcam/capture")
-async def capture_from_webcam(request: Dict[str, Any]):
+async def capture_from_webcam(request: WebcamCaptureRequest):
     """Capture image from IP webcam"""
     try:
-        ip_address = request.get('ip_address')
-        port = request.get('port', 8080)
-        username = request.get('username', '')
-        password = request.get('password', '')
+        webcam_url = f"http://{request.ip_address}:{request.port}/photo.jpg"
         
-        if not ip_address:
-            raise HTTPException(status_code=400, detail="IP address is required")
-        
-        # Construct webcam URL
-        webcam_url = f"http://{ip_address}:{port}/photo.jpg"
-        
-        # Add authentication if provided
         auth = None
-        if username and password:
-            auth = (username, password)
+        if request.username and request.password:
+            auth = (request.username, request.password)
         
-        # Capture image from webcam
         response = requests.get(webcam_url, auth=auth, timeout=10)
         
         if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to capture image from webcam")
+            raise HTTPException(status_code=400, detail="Failed to capture from webcam")
         
         return StreamingResponse(
             io.BytesIO(response.content),
-            media_type="image/jpeg"
+            media_type="image/jpeg",
+            headers={"Content-Disposition": "attachment; filename=capture.jpg"}
         )
         
     except requests.RequestException as e:
-        logger.error(f"Webcam capture error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Webcam connection failed: {str(e)}")
+
+@app.post("/api/attendance/session/create")
+async def create_attendance_session(request: AttendanceSessionRequest):
+    """Create new attendance session"""
+    try:
+        start_time = datetime.now()
+        end_time = start_time + timedelta(hours=request.duration_hours)
+        
+        session_data = {
+            'class_id': request.class_id,
+            'teacher_email': request.teacher_email,
+            'start_time': start_time.isoformat(),
+            'end_time': end_time.isoformat(),
+            'on_time_limit_minutes': request.on_time_limit_minutes,
+            'status': 'active',
+            'created_at': start_time.isoformat()
+        }
+        
+        result = supabase.table('attendance_sessions').insert(session_data).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+        
+        session_id = result.data[0]['id']
+        logger.info(f"Created attendance session: {session_id}")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": "Attendance session created successfully",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat()
+        }
+        
     except Exception as e:
-        logger.error(f"Error in capture_from_webcam: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Capture failed: {str(e)}")
+        logger.error(f"Session creation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
 
 @app.post("/api/attendance/checkin")
-async def checkin_with_face_recognition(request: Dict[str, Any]):
-    """Check in attendance using face recognition"""
+async def checkin_with_face_recognition(request: AttendanceCheckInRequest):
+    """Check in attendance with face recognition"""
     try:
-        session_id = request.get('session_id')
-        student_email = request.get('student_email')
-        webcam_config = request.get('webcam_config', {})
+        # Validate session
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', request.session_id).eq('status', 'active').single().execute()
         
-        if not session_id or not student_email:
-            raise HTTPException(status_code=400, detail="Session ID and student email are required")
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Active session not found")
         
-        # Extract student ID from email (you might want to modify this logic)
-        student_id = student_email.split('@')[0]
+        session_data = session_result.data
+        session_end = datetime.fromisoformat(session_data['end_time'].replace('Z', '+00:00'))
         
-        # Capture image from webcam
-        ip_address = webcam_config.get('ip_address')
-        port = webcam_config.get('port', 8080)
+        if datetime.now() > session_end:
+            raise HTTPException(status_code=400, detail="Session has ended")
         
-        if not ip_address:
-            raise HTTPException(status_code=400, detail="Webcam IP address is required")
+        # Check if already checked in
+        existing_record = supabase.table('attendance_records').select('*').eq('session_id', request.session_id).eq('student_email', request.student_email).execute()
         
-        webcam_url = f"http://{ip_address}:{port}/photo.jpg"
+        if existing_record.data:
+            raise HTTPException(status_code=400, detail="Already checked in for this session")
         
-        # Capture image
-        response = requests.get(webcam_url, timeout=10)
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to capture image from webcam")
+        # Get student info
+        student_result = supabase.table('users').select('school_id').eq('email', request.student_email).single().execute()
         
-        # Process captured image
-        image = Image.open(io.BytesIO(response.content))
-        image_array = np.array(image)
+        if not student_result.data:
+            raise HTTPException(status_code=404, detail="Student not found")
         
-        # Find face in captured image
-        face_locations = face_recognition.face_locations(image_array)
-        if len(face_locations) == 0:
-            raise HTTPException(status_code=400, detail="No face detected in captured image")
+        student_id = student_result.data['school_id']
         
-        face_encodings = face_recognition.face_encodings(image_array, face_locations)
-        if len(face_encodings) == 0:
-            raise HTTPException(status_code=400, detail="Could not encode face from captured image")
+        # For webcam-based check-in, capture and verify face
+        if request.webcam_config:
+            # Capture from webcam
+            webcam_url = f"http://{request.webcam_config['ip_address']}:{request.webcam_config.get('port', 8080)}/photo.jpg"
+            response = requests.get(webcam_url, timeout=10)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=400, detail="Failed to capture from webcam")
+            
+            # Process captured image
+            image = Image.open(io.BytesIO(response.content))
+            image_array = np.array(image)
+            
+            face_locations = face_recognition.face_locations(image_array)
+            if not face_locations:
+                raise HTTPException(status_code=400, detail="No face detected in captured image")
+            
+            face_encodings = face_recognition.face_encodings(image_array, face_locations)
+            if not face_encodings:
+                raise HTTPException(status_code=400, detail="Could not encode face")
+            
+            # Verify against stored face
+            stored_encoding = get_face_from_supabase(student_id)
+            if stored_encoding is None:
+                raise HTTPException(status_code=404, detail="No face data found for student")
+            
+            similarity = calculate_similarity(stored_encoding, face_encodings[0])
+            
+            if similarity < FACE_THRESHOLD:
+                raise HTTPException(status_code=400, detail="Face verification failed")
+        else:
+            similarity = None
         
-        # Get stored face encoding
-        stored_encoding = get_face_embedding(student_id)
-        if stored_encoding is None:
-            raise HTTPException(status_code=404, detail="No face data found for this student")
+        # Determine attendance status
+        check_in_time = datetime.now()
+        session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
+        on_time_limit = session_start + timedelta(minutes=session_data['on_time_limit_minutes'])
         
-        # Verify face
-        similarity = calculate_face_similarity(stored_encoding, face_encodings[0])
-        verified = similarity >= 0.6
+        status = 'present' if check_in_time <= on_time_limit else 'late'
         
-        if not verified:
-            raise HTTPException(status_code=400, detail="Face verification failed")
+        # Save attendance record
+        record_data = {
+            'session_id': request.session_id,
+            'student_email': request.student_email,
+            'student_id': student_id,
+            'check_in_time': check_in_time.isoformat(),
+            'status': status,
+            'face_match_score': similarity,
+            'created_at': check_in_time.isoformat()
+        }
         
-        # Here you would typically save the attendance record to your database
-        # For now, we'll just return success
+        result = supabase.table('attendance_records').insert(record_data).execute()
         
-        logger.info(f"Attendance check-in successful for {student_email}, similarity: {similarity:.3f}")
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save attendance record")
+        
+        logger.info(f"Attendance recorded: {request.student_email} - {status}")
         
         return {
             "success": True,
-            "message": "Attendance recorded successfully",
-            "student_email": student_email,
-            "session_id": session_id,
-            "face_match_score": float(similarity),
-            "check_in_time": datetime.now().isoformat()
+            "message": f"Attendance recorded - {status.upper()}",
+            "student_email": request.student_email,
+            "student_id": student_id,
+            "session_id": request.session_id,
+            "status": status,
+            "check_in_time": check_in_time.isoformat(),
+            "face_match_score": similarity,
+            "face_verified": similarity is not None and similarity >= FACE_THRESHOLD if similarity else False
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in attendance check-in: {str(e)}")
+        logger.error(f"Check-in error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Check-in failed: {str(e)}")
 
-# Additional utility endpoints
-
-@app.get("/api/face/students")
-async def list_registered_students():
-    """List all students with registered faces"""
+@app.get("/api/attendance/session/{session_id}/records")
+async def get_session_records(session_id: str):
+    """Get attendance records for a session"""
     try:
-        conn = sqlite3.connect('face_recognition.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT student_id, student_email, created_at, updated_at 
-            FROM face_embeddings 
-            ORDER BY created_at DESC
-        ''')
-        
-        results = cursor.fetchall()
-        conn.close()
-        
-        students = []
-        for row in results:
-            students.append({
-                "student_id": row[0],
-                "student_email": row[1],
-                "created_at": row[2],
-                "updated_at": row[3]
-            })
+        result = supabase.table('attendance_records').select('*, users(full_name, school_id)').eq('session_id', session_id).order('check_in_time').execute()
         
         return {
             "success": True,
-            "count": len(students),
-            "students": students
+            "session_id": session_id,
+            "records": result.data,
+            "count": len(result.data)
         }
         
     except Exception as e:
-        logger.error(f"Error listing students: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list students: {str(e)}")
-
-@app.delete("/api/face/student/{student_id}")
-async def delete_student_face(student_id: str):
-    """Delete face data for a student"""
-    try:
-        conn = sqlite3.connect('face_recognition.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM face_embeddings WHERE student_id = ?', (student_id,))
-        
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Student face data not found")
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Face data deleted for student: {student_id}")
-        
-        return {
-            "success": True,
-            "message": f"Face data deleted for student {student_id}"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting student face: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete face data: {str(e)}")
+        logger.error(f"Error getting records: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get records: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"🚀 Starting Face Recognition Server on {HOST}:{PORT}")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
