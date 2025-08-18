@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
-import 'package:myproject2/data/models/webcam_config_model.dart';
 import 'package:myproject2/data/services/attendance_service.dart';
 
 
@@ -26,7 +25,6 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
   
   AttendanceSessionModel? _currentSession;
   List<AttendanceRecordModel> _attendanceRecords = [];
-  WebcamConfigModel? _webcamConfig;
   Timer? _refreshTimer;
   
   bool _isLoading = false;

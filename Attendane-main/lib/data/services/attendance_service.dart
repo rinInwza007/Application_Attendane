@@ -4,7 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
-import 'package:myproject2/data/models/webcam_config_model.dart';
 import 'package:myproject2/data/services/auth_service.dart'; // Import AuthService จากไฟล์ที่ถูกต้อง
 import 'dart:math' as Math;
 
