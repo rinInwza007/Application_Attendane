@@ -65,20 +65,13 @@ class AttendancePlusApp extends StatelessWidget {
     return MaterialApp(
       title: AppConstants.appName,
       
-      // Use the defined theme
-      //theme: AppTheme.lightTheme,
-      
-      // Dark theme support (optional)
-      // darkTheme: AppTheme.darkTheme,
-      // themeMode: ThemeMode.system,
-      
-      // Remove debug banner
+    
       debugShowCheckedModeBanner: AppConstants.isDevelopment,
       
-      // Home screen
+
       home: const AppWrapper(),
       
-      // Global error handling
+    
       builder: (context, child) {
         return ErrorBoundary(child: child ?? const SizedBox());
       },
