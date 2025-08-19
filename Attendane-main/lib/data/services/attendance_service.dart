@@ -1,5 +1,6 @@
 // lib/data/services/attendance_service.dart
 import 'dart:convert';
+import 'package:myproject2/data/models/webcam_config_model.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:myproject2/data/models/attendance_record_model.dart';
