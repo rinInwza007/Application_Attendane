@@ -5,6 +5,7 @@ import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/enhanced_attendance_service.dart';
 import 'package:myproject2/data/services/enhanced_periodic_camera_service.dart';
+import 'package:myproject2/data/services/attendance_service.dart'; // เพิ่ม import นี้
 import 'package:myproject2/data/services/auth_service.dart';
 import 'package:camera/camera.dart';
 
@@ -25,6 +26,7 @@ class EnhancedTeacherAttendanceScreen extends StatefulWidget {
 class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttendanceScreen> {
   final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
   final EnhancedPeriodicCameraService _cameraService = EnhancedPeriodicCameraService();
+  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService(); // เพิ่ม service นี้
   final AuthService _authService = AuthService();
   
   // Session state
@@ -148,8 +150,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
 
   Future<void> _loadCurrentSession() async {
     try {
-      // Try to get active session from Supabase first
-      final session = await _authService.getActiveSessionForClass(widget.classId);
+      // ใช้ SimpleAttendanceService แทน AuthService
+      final session = await _simpleAttendanceService.getActiveSessionForClass(widget.classId);
       
       setState(() {
         _currentSession = session;
@@ -176,7 +178,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     if (_currentSession == null) return;
 
     try {
-      final records = await _authService.getAttendanceRecords(_currentSession!.id);
+      // ใช้ SimpleAttendanceService แทน AuthService
+      final records = await _simpleAttendanceService.getAttendanceRecords(_currentSession!.id);
       setState(() => _attendanceRecords = records);
     } catch (e) {
       _addError('Load records: $e');
@@ -233,8 +236,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         throw Exception(result['error'] ?? 'Failed to create session');
       }
 
-      // Create corresponding Supabase session
-      final supabaseSession = await _authService.createAttendanceSession(
+      // Create corresponding Supabase session using SimpleAttendanceService
+      final supabaseSession = await _simpleAttendanceService.createAttendanceSession(
         classId: widget.classId,
         durationHours: _sessionDurationHours,
         onTimeLimitMinutes: _onTimeLimitMinutes,
@@ -312,8 +315,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       // End session in FastAPI
       await _attendanceService.endSession(_currentSession!.id);
       
-      // End session in Supabase
-      await _authService.endAttendanceSession(_currentSession!.id);
+      // End session in Supabase using SimpleAttendanceService
+      await _simpleAttendanceService.endAttendanceSession(_currentSession!.id);
       
       // Final statistics load
       await _loadSessionStatistics();
@@ -867,7 +870,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 Expanded(
                   child: _buildInfoChip(
                     'Attendance Rate',
-                    '${(_sessionStats['statistics']?['attendance_rate'] ?? 0.0) * 100}%',
+                    '${((_sessionStats['statistics']?['attendance_rate'] ?? 0.0) * 100).toStringAsFixed(1)}%',
                     Colors.green,
                   ),
                 ),

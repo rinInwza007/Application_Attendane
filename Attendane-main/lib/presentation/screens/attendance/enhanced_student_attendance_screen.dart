@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/enhanced_attendance_service.dart';
+import 'package:myproject2/data/services/attendance_service.dart'; // เพิ่ม import
 import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/presentation/screens/face/enhanced_realtime_face_detection_screen.dart';
 
@@ -23,6 +24,7 @@ class EnhancedStudentAttendanceScreen extends StatefulWidget {
 
 class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttendanceScreen> {
   final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
+  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService(); // เพิ่ม service นี้
   final AuthService _authService = AuthService();
   
   AttendanceSessionModel? _currentSession;
@@ -122,7 +124,8 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
 
   Future<void> _loadCurrentSession() async {
     try {
-      final session = await _authService.getActiveSessionForClass(widget.classId);
+      // ใช้ SimpleAttendanceService แทน AuthService
+      final session = await _simpleAttendanceService.getActiveSessionForClass(widget.classId);
       
       setState(() => _currentSession = session);
       
@@ -141,7 +144,8 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
       final userEmail = _authService.getCurrentUserEmail();
       if (userEmail == null) return;
 
-      final records = await _authService.getAttendanceRecords(_currentSession!.id);
+      // ใช้ SimpleAttendanceService แทน AuthService
+      final records = await _simpleAttendanceService.getAttendanceRecords(_currentSession!.id);
       final myRecord = records.where((r) => r.studentEmail == userEmail).firstOrNull;
       
       setState(() => _myAttendanceRecord = myRecord);
@@ -155,7 +159,8 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
       final userEmail = _authService.getCurrentUserEmail();
       if (userEmail == null) return;
 
-      final history = await _authService.getStudentAttendanceHistory(userEmail);
+      // ใช้ SimpleAttendanceService แทน AuthService
+      final history = await _simpleAttendanceService.getStudentAttendanceHistory(userEmail);
       
       setState(() => _myAttendanceHistory = history);
     } catch (e) {
@@ -310,8 +315,8 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Version: ${_serverHealth['version'] ?? 'Unknown'}'),
-                    Text('Cache Size: ${_serverHealth['cache_size'] ?? 0} students'),
+                    Text('Version: ${_serverHealth['data']?['version'] ?? 'Unknown'}'),
+                    Text('Cache Size: ${_serverHealth['data']?['cache']?['size'] ?? 0} students'),
                   ],
                 ),
               ),
@@ -386,7 +391,8 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
           final userProfile = await _authService.getUserProfile();
           if (userProfile != null) {
             final studentId = userProfile['school_id'];
-            await _attendanceService.deleteFaceEnrollment(studentId);
+            // Note: deleteFaceEnrollment method should be implemented in EnhancedAttendanceService
+            // await _attendanceService.deleteFaceEnrollment(studentId);
           }
         }
 
@@ -1199,9 +1205,9 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('Status: ${_isServerHealthy ? "Online" : "Offline"}'),
-              if (_isServerHealthy) ...[
-                Text('Version: ${_serverHealth['version'] ?? "Unknown"}'),
-                Text('Cache Size: ${_serverHealth['cache_size'] ?? 0} students'),
+              if (_isServerHealthy && _serverHealth['data'] != null) ...[
+                Text('Version: ${_serverHealth['data']['version'] ?? "Unknown"}'),
+                Text('Cache Size: ${_serverHealth['data']['cache']?['size'] ?? 0} students'),
                 const SizedBox(height: 12),
                 const Text('Available Features:'),
                 const Text('• Enhanced face recognition'),

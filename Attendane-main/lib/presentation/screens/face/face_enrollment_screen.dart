@@ -163,19 +163,21 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
     }
   }
 
+  // แก้ไขเมธอด _removeImage เพื่อแก้ปัญหา undefined imagePath
   void _removeImage(int index) {
-    if (index < 0 || index >= _capturedImages.length) return;
+  if (index < 0 || index >= _capturedImages.length) return;
 
-    setState(() {
-      final imagePath = _capturedImages.removeAt(index);
-      _statusMessage = 'ลบรูปแล้ว - เหลือ ${_capturedImages.length}/$_requiredImages รูป';
-    });
+  final removedImagePath = _capturedImages[index];
 
-    // Delete file
-    File(imagePath).delete().catchError((e) {
-      print('Error deleting file: $e');
-    });
-  }
+  setState(() {
+    _capturedImages.removeAt(index);
+    _statusMessage = 'ลบรูปแล้ว - เหลือ ${_capturedImages.length}/$_requiredImages รูป';
+  });
+
+  File(removedImagePath).delete().catchError((e) {
+    print('Error deleting file: $e');
+  });
+}
 
   Future<void> _processEnrollment() async {
     if (_capturedImages.length < _requiredImages) {
@@ -280,11 +282,11 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
   }
 
   Future<void> _cleanupImages() async {
-    for (final imagePath in _capturedImages) {
+    for (final imagePathToDelete in _capturedImages) {
       try {
-        await File(imagePath).delete();
+        await File(imagePathToDelete).delete();
       } catch (e) {
-        print('Error deleting file $imagePath: $e');
+        print('Error deleting file $imagePathToDelete: $e');
       }
     }
     _capturedImages.clear();
