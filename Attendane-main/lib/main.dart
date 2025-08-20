@@ -155,7 +155,7 @@ class SplashScreen extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // App Logo
+
             Container(
               width: 120,
               height: 120,
@@ -193,7 +193,7 @@ class SplashScreen extends StatelessWidget {
             
             const SizedBox(height: 48),
             
-            // Loading indicator
+            
             SizedBox(
               width: 32,
               height: 32,
@@ -327,9 +327,7 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
         });
       }
       
-      // Log error in production
       if (!AppConstants.isDevelopment) {
-        // TODO: Send to crash reporting service
         print('Flutter Error: ${details.exception}');
       }
     };

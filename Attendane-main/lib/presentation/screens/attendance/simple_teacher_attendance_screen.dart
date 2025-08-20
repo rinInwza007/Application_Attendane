@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
+import 'package:myproject2/data/models/webcam_config_model.dart'; // เพิ่ม import
 import 'package:myproject2/data/services/attendance_service.dart';
-
 
 class SimpleTeacherAttendanceScreen extends StatefulWidget {
   final String classId;
@@ -29,6 +29,9 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
   
   bool _isLoading = false;
   bool _isCreatingSession = false;
+  
+  // เพิ่มตัวแปร webcam config ที่หายไป
+  WebcamConfigModel? _webcamConfig;
 
   // Form controllers for creating session
   final _durationController = TextEditingController(text: '2');

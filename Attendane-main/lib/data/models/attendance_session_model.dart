@@ -6,6 +6,7 @@ class AttendanceSessionModel {
   final DateTime startTime;
   final DateTime endTime;
   final int onTimeLimitMinutes; // เวลาที่ถือว่ามาทัน (นาที)
+  final int captureIntervalMinutes; // ช่วงเวลาการถ่ายรูป (นาที) - เพิ่มใหม่
   final String status; // 'active', 'ended', 'cancelled'
   final DateTime createdAt;
   final DateTime? updatedAt;
@@ -17,11 +18,11 @@ class AttendanceSessionModel {
     required this.startTime,
     required this.endTime,
     required this.onTimeLimitMinutes,
+    this.captureIntervalMinutes = 5, // ค่า default 5 นาที
     required this.status,
     required this.createdAt,
     this.updatedAt,
   });
-
 
   factory AttendanceSessionModel.fromJson(Map<String, dynamic> json) {
     return AttendanceSessionModel(
@@ -31,6 +32,7 @@ class AttendanceSessionModel {
       startTime: DateTime.parse(json['start_time']),
       endTime: DateTime.parse(json['end_time']),
       onTimeLimitMinutes: json['on_time_limit_minutes'] ?? 30,
+      captureIntervalMinutes: json['capture_interval_minutes'] ?? 5, // เพิ่มใหม่
       status: json['status'] ?? 'active',
       createdAt: DateTime.parse(json['created_at']),
       updatedAt: json['updated_at'] != null 
@@ -47,6 +49,7 @@ class AttendanceSessionModel {
       'start_time': startTime.toIso8601String(),
       'end_time': endTime.toIso8601String(),
       'on_time_limit_minutes': onTimeLimitMinutes,
+      'capture_interval_minutes': captureIntervalMinutes, // เพิ่มใหม่
       'status': status,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt?.toIso8601String(),
@@ -61,6 +64,7 @@ class AttendanceSessionModel {
     DateTime? startTime,
     DateTime? endTime,
     int? onTimeLimitMinutes,
+    int? captureIntervalMinutes, // เพิ่มใหม่
     String? status,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -72,6 +76,7 @@ class AttendanceSessionModel {
       startTime: startTime ?? this.startTime,
       endTime: endTime ?? this.endTime,
       onTimeLimitMinutes: onTimeLimitMinutes ?? this.onTimeLimitMinutes,
+      captureIntervalMinutes: captureIntervalMinutes ?? this.captureIntervalMinutes, // เพิ่มใหม่
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -202,6 +207,17 @@ class AttendanceSessionModel {
     }
   }
 
+  /// แสดงช่วงเวลาการถ่ายรูปเป็นข้อความ - เพิ่มใหม่
+  String get captureIntervalText {
+    if (captureIntervalMinutes < 60) {
+      return '${captureIntervalMinutes}m';
+    } else {
+      final hours = captureIntervalMinutes ~/ 60;
+      final minutes = captureIntervalMinutes % 60;
+      return minutes > 0 ? '${hours}h ${minutes}m' : '${hours}h';
+    }
+  }
+
   /// แสดงเวลาที่เหลือเป็นข้อความ
   String get timeRemainingText {
     if (isEnded) return 'Session ended';
@@ -240,6 +256,7 @@ class AttendanceSessionModel {
     DateTime? startTime,
     int? durationHours,
     int? onTimeLimitMinutes,
+    int? captureIntervalMinutes, // เพิ่มใหม่
     String? status,
   }) {
     final start = startTime ?? DateTime.now();
@@ -252,6 +269,7 @@ class AttendanceSessionModel {
       startTime: start,
       endTime: start.add(Duration(hours: duration)),
       onTimeLimitMinutes: onTimeLimitMinutes ?? 30,
+      captureIntervalMinutes: captureIntervalMinutes ?? 5, // เพิ่มใหม่
       status: status ?? 'active',
       createdAt: start,
       updatedAt: null,
@@ -262,7 +280,7 @@ class AttendanceSessionModel {
   @override
   String toString() {
     return 'AttendanceSession(id: $id, class: $classId, status: $status, '
-           'time: $timeRange, duration: $durationText)';
+           'time: $timeRange, duration: $durationText, captureInterval: $captureIntervalText)';
   }
 
   /// เปรียบเทียบว่า session เหมือนกันหรือไม่
@@ -277,6 +295,7 @@ class AttendanceSessionModel {
         other.startTime == startTime &&
         other.endTime == endTime &&
         other.onTimeLimitMinutes == onTimeLimitMinutes &&
+        other.captureIntervalMinutes == captureIntervalMinutes && // เพิ่มใหม่
         other.status == status &&
         other.createdAt == createdAt &&
         other.updatedAt == updatedAt;
@@ -290,10 +309,9 @@ class AttendanceSessionModel {
         startTime.hashCode ^
         endTime.hashCode ^
         onTimeLimitMinutes.hashCode ^
+        captureIntervalMinutes.hashCode ^ // เพิ่มใหม่
         status.hashCode ^
         createdAt.hashCode ^
         (updatedAt?.hashCode ?? 0);
-  
   }
-  
 }

@@ -1,4 +1,4 @@
-// lib/data/services/enhanced_attendance_service.dart
+// lib/data/services/enhanced_attendance_service.dart - แก้ไข error
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -8,6 +8,7 @@ import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/models/webcam_config_model.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/attendance_service.dart'; // เพิ่ม import
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 
@@ -16,6 +17,13 @@ class EnhancedAttendanceService {
   
   final http.Client _client = http.Client();
   final AuthService _authService = AuthService();
+  // เพิ่มตัวแปรสำหรับ attendance service
+  late final SimpleAttendanceService _simpleAttendanceService;
+
+  // Constructor - เพิ่มการ initialize attendance service
+  EnhancedAttendanceService() {
+    _simpleAttendanceService = SimpleAttendanceService();
+  }
 
   // Headers for JSON requests
   Map<String, String> get _headers => {
@@ -162,6 +170,32 @@ class EnhancedAttendanceService {
       
     } catch (e) {
       print('❌ Error verifying face enrollment: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> deleteFaceEnrollment(String studentId) async {
+    try {
+      final response = await _client.delete(
+        Uri.parse('$BASE_URL/api/face/$studentId'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        return {
+          'success': true,
+          'message': result['message'],
+        };
+      } else {
+        throw Exception('Failed to delete face enrollment');
+      }
+      
+    } catch (e) {
+      print('❌ Error deleting face enrollment: $e');
       return {
         'success': false,
         'error': e.toString(),
@@ -425,7 +459,7 @@ class EnhancedAttendanceService {
 
   Future<Map<String, dynamic>> _calculateBasicStatistics(String sessionId) async {
     try {
-      // Get attendance records from Supabase
+      // แก้ไข: ใช้ _simpleAttendanceService แทน _authService.attendanceService
       final records = await _getAttendanceRecordsFromSupabase(sessionId);
       
       final totalStudents = records.length;
@@ -466,7 +500,8 @@ class EnhancedAttendanceService {
 
   Future<List<AttendanceRecordModel>> _getAttendanceRecordsFromSupabase(String sessionId) async {
     try {
-      final response = await _authService.attendanceService.getAttendanceRecords(sessionId);
+      // แก้ไข: ใช้ _simpleAttendanceService โดยตรง
+      final response = await _simpleAttendanceService.getAttendanceRecords(sessionId);
       return response;
     } catch (e) {
       print('❌ Error getting records from Supabase: $e');
