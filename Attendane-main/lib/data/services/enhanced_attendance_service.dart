@@ -1,569 +1,656 @@
-// lib/data/services/enhanced_periodic_camera_service.dart
-import 'dart:async';
+// lib/data/services/enhanced_attendance_service.dart
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:camera/camera.dart';
+import 'package:http/http.dart' as http;
+import 'package:myproject2/core/service_locator.dart';
+import 'package:myproject2/data/models/attendance_record_model.dart';
+import 'package:myproject2/data/models/attendance_session_model.dart';
+import 'package:myproject2/data/models/webcam_config_model.dart';
+import 'package:myproject2/data/services/auth_service.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
-import 'package:myproject2/data/services/enhanced_attendance_service.dart';
-import 'package:myproject2/data/models/attendance_session_model.dart';
 
-enum CameraServiceStatus {
-  idle,
-  initializing,
-  ready,
-  capturing,
-  processing,
-  error
-}
+class EnhancedAttendanceService {
+  static const String BASE_URL = 'http://192.168.1.100:8000'; // Update with your server IP
+  
+  final http.Client _client = http.Client();
+  final AuthService _authService = AuthService();
 
-class EnhancedPeriodicCameraService {
-  CameraController? _controller;
-  List<CameraDescription> _cameras = [];
-  Timer? _periodicTimer;
-  Timer? _sessionTimer;
-  
-  final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
-  
-  // Current state
-  CameraServiceStatus _status = CameraServiceStatus.idle;
-  AttendanceSessionModel? _currentSession;
-  
-  // Configuration
-  Duration _captureInterval = const Duration(minutes: 5);
-  bool _isRunning = false;
-  bool _isInitialized = false;
-  
-  // Statistics
-  int _totalCaptures = 0;
-  int _successfulCaptures = 0;
-  int _processedImages = 0;
-  int _detectedFaces = 0;
-  DateTime? _lastCaptureTime;
-  DateTime? _sessionStartTime;
-  
-  // Error handling
-  String? _lastError;
-  int _consecutiveErrors = 0;
-  static const int _maxConsecutiveErrors = 3;
-  
-  // Callbacks
-  Function(String imagePath, DateTime captureTime)? onImageCaptured;
-  Function(Map<String, dynamic> result)? onAttendanceProcessed;
-  Function(String error)? onError;
-  Function(CameraServiceStatus status)? onStatusChanged;
-  Function(Map<String, dynamic> stats)? onStatsUpdated;
+  // Headers for JSON requests
+  Map<String, String> get _headers => {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
 
-  // Getters
-  bool get isRunning => _isRunning;
-  bool get isInitialized => _isInitialized;
-  CameraServiceStatus get status => _status;
-  CameraController? get controller => _controller;
-  Map<String, dynamic> get statistics => _getStatistics();
-  AttendanceSessionModel? get currentSession => _currentSession;
+  // ==================== Enhanced Health Check ====================
   
-  /// Initialize camera service with enhanced error handling
-  Future<bool> initialize() async {
+  Future<Map<String, dynamic>> checkServerHealth() async {
     try {
-      _updateStatus(CameraServiceStatus.initializing);
-      print('🔄 Initializing enhanced periodic camera service...');
+      final response = await _client.get(
+        Uri.parse('$BASE_URL/health'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 10));
       
-      // Test server connection first
-      final serverHealthy = await _attendanceService.testServerConnection();
-      if (!serverHealthy) {
-        throw Exception('Face recognition server is not available');
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        return {
+          'healthy': true,
+          'data': data,
+          'cache_size': data['cache']?['size'] ?? 0,
+          'version': data['version'] ?? 'unknown',
+        };
+      } else {
+        return {
+          'healthy': false,
+          'error': 'Server returned ${response.statusCode}',
+        };
       }
-      
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) {
-        throw Exception('No cameras available on this device');
-      }
-      
-      // Prefer front camera for attendance
-      final frontCamera = _cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.front,
-        orElse: () => _cameras.first,
-      );
-      
-      _controller = CameraController(
-        frontCamera,
-        ResolutionPreset.high, // Higher quality for better face recognition
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-      
-      await _controller!.initialize();
-      
-      _isInitialized = true;
-      _consecutiveErrors = 0;
-      _lastError = null;
-      
-      _updateStatus(CameraServiceStatus.ready);
-      print('✅ Enhanced periodic camera service initialized');
-      return true;
-      
     } catch (e) {
-      _lastError = e.toString();
-      _updateStatus(CameraServiceStatus.error);
-      print('❌ Error initializing camera: $e');
-      onError?.call('Failed to initialize camera: $e');
-      return false;
+      return {
+        'healthy': false,
+        'error': e.toString(),
+      };
     }
   }
 
-  /// Start periodic capture with session management
-  Future<void> startPeriodicCapture({
-    required AttendanceSessionModel session,
-    Duration? interval,
+  // ==================== Enhanced Face Enrollment ====================
+  
+  Future<Map<String, dynamic>> enrollFaceMultipleImages({
+    required List<String> imagePaths,
+    required String studentId,
+    required String studentEmail,
+    int maxRetries = 3,
   }) async {
-    if (!_isInitialized || _isRunning) return;
-    
-    try {
-      _currentSession = session;
-      _captureInterval = interval ?? Duration(minutes: session.captureIntervalMinutes ?? 5);
-      
-      _isRunning = true;
-      _sessionStartTime = DateTime.now();
-      _totalCaptures = 0;
-      _successfulCaptures = 0;
-      _processedImages = 0;
-      _detectedFaces = 0;
-      
-      _updateStatus(CameraServiceStatus.capturing);
-      print('📸 Starting periodic capture for session: ${session.id}');
-      print('   Interval: ${_captureInterval.inMinutes} minutes');
-      print('   Session duration: ${session.durationText}');
-      
-      // Start session monitoring
-      _startSessionMonitoring();
-      
-      // Capture first image immediately
-      await _captureAndProcess();
-      
-      // Set up periodic timer
-      _periodicTimer = Timer.periodic(_captureInterval, (timer) async {
-        if (_isRunning && _isInitialized && _currentSession != null) {
-          // Check if session is still active
-          if (_currentSession!.isActive) {
-            await _captureAndProcess();
-          } else {
-            print('⏰ Session ended, stopping periodic capture');
-            await stopPeriodicCapture();
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        print('🔄 Enrolling face attempt $attempt/$maxRetries for $studentId');
+        
+        final uri = Uri.parse('$BASE_URL/api/face/enroll');
+        final request = http.MultipartRequest('POST', uri);
+        
+        // Add form fields
+        request.fields['student_id'] = studentId;
+        request.fields['student_email'] = studentEmail;
+        
+        // Add image files
+        for (int i = 0; i < imagePaths.length; i++) {
+          final imagePath = imagePaths[i];
+          final file = File(imagePath);
+          
+          if (!await file.exists()) {
+            throw Exception('Image file not found: $imagePath');
           }
-        } else {
-          timer.cancel();
+          
+          final multipartFile = await http.MultipartFile.fromPath(
+            'images',
+            imagePath,
+            filename: 'face_image_${i + 1}_${DateTime.now().millisecondsSinceEpoch}.jpg',
+          );
+          
+          request.files.add(multipartFile);
         }
-      });
-      
-      _updateStats();
-      
-    } catch (e) {
-      print('❌ Error starting periodic capture: $e');
-      onError?.call('Failed to start periodic capture: $e');
-      await stopPeriodicCapture();
-    }
-  }
-
-  /// Stop periodic capture
-  Future<void> stopPeriodicCapture() async {
-    if (!_isRunning) return;
-    
-    _periodicTimer?.cancel();
-    _periodicTimer = null;
-    _sessionTimer?.cancel();
-    _sessionTimer = null;
-    
-    _isRunning = false;
-    _currentSession = null;
-    
-    _updateStatus(CameraServiceStatus.ready);
-    print('⏹️ Periodic capture stopped');
-    
-    // Final statistics update
-    _updateStats();
-    
-    // Cleanup old images
-    await _cleanupOldImages();
-  }
-
-  /// Session monitoring
-  void _startSessionMonitoring() {
-    _sessionTimer?.cancel();
-    _sessionTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-      if (_currentSession != null) {
-        if (_currentSession!.isActive) {
-          _updateStats();
-        } else {
-          print('⏰ Session expired, stopping monitoring');
-          timer.cancel();
-          stopPeriodicCapture();
-        }
-      } else {
-        timer.cancel();
-      }
-    });
-  }
-
-  /// Capture and process image with enhanced error handling
-  Future<void> _captureAndProcess() async {
-    if (!_isInitialized || _controller == null || !_controller!.value.isInitialized) {
-      return;
-    }
-    
-    final captureTime = DateTime.now();
-    String? imagePath;
-    
-    try {
-      _updateStatus(CameraServiceStatus.capturing);
-      _totalCaptures++;
-      
-      print('📷 Capturing image ${_totalCaptures} at ${_formatTime(captureTime)}');
-      
-      // Capture image
-      final XFile imageFile = await _controller!.takePicture();
-      
-      // Save to permanent location
-      imagePath = await _saveImagePermanently(imageFile);
-      
-      // Delete temporary file
-      await File(imageFile.path).delete();
-      
-      _successfulCaptures++;
-      _lastCaptureTime = captureTime;
-      
-      // Notify about image capture
-      onImageCaptured?.call(imagePath, captureTime);
-      
-      // Process with FastAPI in background
-      _processAttendanceInBackground(imagePath, captureTime);
-      
-      // Reset error counter on success
-      _consecutiveErrors = 0;
-      _lastError = null;
-      
-      _updateStatus(CameraServiceStatus.ready);
-      
-    } catch (e) {
-      _consecutiveErrors++;
-      _lastError = e.toString();
-      
-      print('❌ Error in capture ${_totalCaptures}: $e');
-      print('   Consecutive errors: $_consecutiveErrors/$_maxConsecutiveErrors');
-      
-      // Clean up partial image if exists
-      if (imagePath != null) {
-        try {
-          await File(imagePath).delete();
-        } catch (deleteError) {
-          print('⚠️ Failed to delete failed capture: $deleteError');
-        }
-      }
-      
-      // Stop if too many consecutive errors
-      if (_consecutiveErrors >= _maxConsecutiveErrors) {
-        print('💥 Too many consecutive errors, stopping periodic capture');
-        await stopPeriodicCapture();
-        onError?.call('Stopped due to repeated capture failures: $e');
-      } else {
-        onError?.call('Capture failed (${_consecutiveErrors}/$_maxConsecutiveErrors): $e');
-      }
-      
-      _updateStatus(CameraServiceStatus.error);
-    } finally {
-      _updateStats();
-    }
-  }
-
-  /// Process attendance in background
-  void _processAttendanceInBackground(String imagePath, DateTime captureTime) async {
-    if (_currentSession == null) return;
-    
-    try {
-      _updateStatus(CameraServiceStatus.processing);
-      _processedImages++;
-      
-      print('🔄 Processing attendance for image: ${path.basename(imagePath)}');
-      
-      // Send to FastAPI for processing
-      final result = await _attendanceService.processPeriodicAttendance(
-        imagePath: imagePath,
-        sessionId: _currentSession!.id,
-        captureTime: captureTime,
-        deleteImageAfter: true, // Clean up after processing
-      );
-      
-      if (result['success']) {
-        final facesDetected = result['faces_detected'] as int? ?? 0;
-        _detectedFaces += facesDetected;
         
-        print('✅ Attendance processed successfully');
-        print('   Faces detected: $facesDetected');
-        print('   Total faces so far: $_detectedFaces');
+        // Send request with timeout
+        final streamedResponse = await request.send().timeout(
+          Duration(seconds: 30 + (imagePaths.length * 10)), // Dynamic timeout
+        );
         
-        onAttendanceProcessed?.call(result);
-      } else {
-        print('❌ Attendance processing failed: ${result['error']}');
-        onError?.call('Attendance processing failed: ${result['error']}');
+        final response = await http.Response.fromStream(streamedResponse);
+        
+        if (response.statusCode == 200) {
+          final result = json.decode(response.body);
+          print('✅ Face enrollment successful: ${result['message']}');
+          
+          // Clear server cache after enrollment
+          await _clearServerCache();
+          
+          return {
+            'success': true,
+            'data': result,
+            'images_processed': result['images_processed'],
+            'quality_score': result['quality_score'],
+          };
+        } else {
+          final error = json.decode(response.body);
+          if (attempt == maxRetries) {
+            throw Exception(error['detail'] ?? 'Face enrollment failed');
+          }
+          print('⚠️ Enrollment attempt $attempt failed, retrying...');
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
+        
+      } catch (e) {
+        if (attempt == maxRetries) {
+          print('❌ Face enrollment failed after $maxRetries attempts: $e');
+          return {
+            'success': false,
+            'error': e.toString(),
+            'attempts': attempt,
+          };
+        }
+        print('⚠️ Enrollment attempt $attempt error: $e, retrying...');
+        await Future.delayed(Duration(seconds: attempt * 2));
       }
-      
-    } catch (e) {
-      print('❌ Error in background processing: $e');
-      onError?.call('Background processing error: $e');
-    } finally {
-      _updateStatus(CameraServiceStatus.ready);
-      _updateStats();
     }
-  }
-
-  /// Save captured image to permanent location
-  Future<String> _saveImagePermanently(XFile imageFile) async {
-    final Directory appDir = await getApplicationDocumentsDirectory();
-    final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-    final String fileName = 'attendance_$timestamp.jpg';
-    final String savedPath = path.join(appDir.path, 'attendance_images', fileName);
-    
-    // Ensure directory exists
-    final Directory imageDir = Directory(path.dirname(savedPath));
-    if (!await imageDir.exists()) {
-      await imageDir.create(recursive: true);
-    }
-    
-    // Copy to permanent location
-    final File permanentFile = await File(imageFile.path).copy(savedPath);
-    
-    print('💾 Image saved: $savedPath (${await _getFileSize(permanentFile)})');
-    
-    return savedPath;
-  }
-
-  /// Capture single image manually
-  Future<String?> captureSingleImage() async {
-    if (!_isInitialized || _controller == null) {
-      throw Exception('Camera not initialized');
-    }
-    
-    try {
-      print('📸 Capturing single image manually');
-      
-      final XFile imageFile = await _controller!.takePicture();
-      final String savedPath = await _saveImagePermanently(imageFile);
-      
-      // Delete temporary file
-      await File(imageFile.path).delete();
-      
-      return savedPath;
-      
-    } catch (e) {
-      print('❌ Error capturing single image: $e');
-      onError?.call('Failed to capture image: $e');
-      return null;
-    }
-  }
-
-  /// Switch camera (front/back)
-  Future<bool> switchCamera() async {
-    if (!_isInitialized || _cameras.length < 2) return false;
-    
-    try {
-      final currentCamera = _controller!.description;
-      final newCamera = _cameras.firstWhere(
-        (camera) => camera.lensDirection != currentCamera.lensDirection,
-        orElse: () => _cameras.first,
-      );
-      
-      if (newCamera == currentCamera) return false;
-      
-      await _controller!.dispose();
-      
-      _controller = CameraController(
-        newCamera,
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-      
-      await _controller!.initialize();
-      
-      print('🔄 Camera switched to: ${newCamera.lensDirection}');
-      return true;
-      
-    } catch (e) {
-      print('❌ Error switching camera: $e');
-      onError?.call('Failed to switch camera: $e');
-      return false;
-    }
-  }
-
-  /// Update status and notify listeners
-  void _updateStatus(CameraServiceStatus newStatus) {
-    if (_status != newStatus) {
-      _status = newStatus;
-      onStatusChanged?.call(newStatus);
-    }
-  }
-
-  /// Update statistics and notify listeners
-  void _updateStats() {
-    onStatsUpdated?.call(_getStatistics());
-  }
-
-  /// Get comprehensive statistics
-  Map<String, dynamic> _getStatistics() {
-    final sessionDuration = _sessionStartTime != null 
-        ? DateTime.now().difference(_sessionStartTime!)
-        : Duration.zero;
     
     return {
-      'status': _status.toString().split('.').last,
-      'isInitialized': _isInitialized,
-      'isRunning': _isRunning,
-      'currentSession': _currentSession?.id,
-      'captureInterval': _captureInterval.inMinutes,
-      'totalCaptures': _totalCaptures,
-      'successfulCaptures': _successfulCaptures,
-      'processedImages': _processedImages,
-      'detectedFaces': _detectedFaces,
-      'consecutiveErrors': _consecutiveErrors,
-      'lastError': _lastError,
-      'lastCaptureTime': _lastCaptureTime?.toIso8601String(),
-      'sessionDuration': sessionDuration.inMinutes,
-      'captureSuccessRate': _totalCaptures > 0 ? _successfulCaptures / _totalCaptures : 0.0,
-      'facesPerCapture': _successfulCaptures > 0 ? _detectedFaces / _successfulCaptures : 0.0,
-      'availableCameras': _cameras.length,
-      'currentCamera': _controller?.description.lensDirection.toString(),
+      'success': false,
+      'error': 'Max retries exceeded',
+      'attempts': maxRetries,
     };
   }
 
-  /// Clean up old images
-  Future<void> _cleanupOldImages({int maxAgeHours = 24}) async {
+  Future<Map<String, dynamic>> verifyFaceEnrollment(String studentId) async {
     try {
-      await _attendanceService.cleanupOldImages(maxAgeHours: maxAgeHours);
-    } catch (e) {
-      print('⚠️ Error during image cleanup: $e');
-    }
-  }
-
-  /// Utility methods
-  String _formatTime(DateTime dateTime) {
-    return '${dateTime.hour.toString().padLeft(2, '0')}:'
-           '${dateTime.minute.toString().padLeft(2, '0')}:'
-           '${dateTime.second.toString().padLeft(2, '0')}';
-  }
-
-  Future<String> _getFileSize(File file) async {
-    try {
-      final bytes = await file.length();
-      if (bytes < 1024) return '${bytes}B';
-      if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)}KB';
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}MB';
-    } catch (e) {
-      return 'Unknown';
-    }
-  }
-
-  /// Test capture functionality
-  Future<Map<String, dynamic>> testCapture() async {
-    try {
-      if (!_isInitialized) {
-        throw Exception('Camera not initialized');
+      final response = await _client.get(
+        Uri.parse('$BASE_URL/api/face/verify/$studentId'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        return {
+          'success': true,
+          'has_face_data': result['has_face_data'] ?? false,
+          'student_id': result['student_id'],
+          'quality_score': result['quality_score'],
+        };
+      } else {
+        throw Exception('Failed to verify face enrollment');
       }
       
-      print('🧪 Testing capture functionality...');
-      
-      final startTime = DateTime.now();
-      final imagePath = await captureSingleImage();
-      final endTime = DateTime.now();
-      
-      if (imagePath == null) {
-        throw Exception('Failed to capture test image');
-      }
-      
-      final file = File(imagePath);
-      final fileSize = await file.length();
-      
-      // Clean up test image
-      await file.delete();
-      
-      final duration = endTime.difference(startTime);
-      
-      return {
-        'success': true,
-        'capture_time_ms': duration.inMilliseconds,
-        'file_size_bytes': fileSize,
-        'message': 'Capture test successful'
-      };
-      
     } catch (e) {
+      print('❌ Error verifying face enrollment: $e');
       return {
         'success': false,
         'error': e.toString(),
-        'message': 'Capture test failed'
       };
     }
   }
 
-  /// Get camera information
-  Map<String, dynamic> getCameraInfo() {
-    if (!_isInitialized || _controller == null) {
-      return {'initialized': false};
+  // ==================== Enhanced Session Management ====================
+  
+  Future<Map<String, dynamic>> createEnhancedSession({
+    required String classId,
+    required String teacherEmail,
+    int durationHours = 2,
+    int captureIntervalMinutes = 5,
+    int onTimeLimitMinutes = 30,
+  }) async {
+    try {
+      print('🔄 Creating enhanced session for class: $classId');
+      
+      final response = await _client.post(
+        Uri.parse('$BASE_URL/api/session/create'),
+        headers: _headers,
+        body: json.encode({
+          'class_id': classId,
+          'teacher_email': teacherEmail,
+          'duration_hours': durationHours,
+          'capture_interval_minutes': captureIntervalMinutes,
+          'on_time_limit_minutes': onTimeLimitMinutes,
+        }),
+      ).timeout(const Duration(seconds: 30));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        print('✅ Enhanced session created: ${result['session_id']}');
+        
+        return {
+          'success': true,
+          'session_id': result['session_id'],
+          'start_time': result['start_time'],
+          'end_time': result['end_time'],
+          'capture_interval_minutes': result['capture_interval_minutes'],
+          'on_time_limit_minutes': result['on_time_limit_minutes'],
+        };
+      } else {
+        final error = json.decode(response.body);
+        throw Exception(error['detail'] ?? 'Failed to create session');
+      }
+      
+    } catch (e) {
+      print('❌ Session creation error: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> endSession(String sessionId) async {
+    try {
+      final response = await _client.put(
+        Uri.parse('$BASE_URL/api/session/$sessionId/end'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 30));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        return {
+          'success': true,
+          'message': result['message'],
+          'session_id': sessionId,
+        };
+      } else {
+        final error = json.decode(response.body);
+        throw Exception(error['detail'] ?? 'Failed to end session');
+      }
+      
+    } catch (e) {
+      print('❌ Error ending session: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  // ==================== Periodic Attendance Processing ====================
+  
+  Future<Map<String, dynamic>> processPeriodicAttendance({
+    required String imagePath,
+    required String sessionId,
+    required DateTime captureTime,
+    bool deleteImageAfter = true,
+  }) async {
+    try {
+      print('📸 Processing periodic attendance for session: $sessionId');
+      
+      final uri = Uri.parse('$BASE_URL/api/attendance/periodic');
+      final request = http.MultipartRequest('POST', uri);
+      
+      // Add form fields
+      request.fields['session_id'] = sessionId;
+      request.fields['capture_time'] = captureTime.toIso8601String();
+      
+      // Add image file
+      final file = File(imagePath);
+      if (!await file.exists()) {
+        throw Exception('Image file not found: $imagePath');
+      }
+      
+      final multipartFile = await http.MultipartFile.fromPath(
+        'image',
+        imagePath,
+        filename: 'attendance_${DateTime.now().millisecondsSinceEpoch}.jpg',
+      );
+      
+      request.files.add(multipartFile);
+      
+      // Send request with timeout
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 60), // Longer timeout for processing
+      );
+      
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      // Clean up image file if requested
+      if (deleteImageAfter) {
+        try {
+          await file.delete();
+          print('🗑️ Cleaned up image file: $imagePath');
+        } catch (e) {
+          print('⚠️ Failed to delete image file: $e');
+        }
+      }
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        print('✅ Periodic attendance processed successfully');
+        print('   Faces detected: ${result['faces_detected']}');
+        print('   Message: ${result['message']}');
+        
+        return {
+          'success': true,
+          'faces_detected': result['faces_detected'],
+          'message': result['message'],
+          'session_id': result['session_id'],
+          'capture_time': result['capture_time'],
+          'enrolled_students': result['enrolled_students'],
+        };
+      } else {
+        final error = json.decode(response.body);
+        throw Exception(error['detail'] ?? 'Failed to process attendance');
+      }
+      
+    } catch (e) {
+      print('❌ Periodic attendance processing error: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  // ==================== Batch Processing ====================
+  
+  Future<Map<String, dynamic>> processMultipleImages({
+    required List<String> imagePaths,
+    required String sessionId,
+    required List<DateTime> captureTimes,
+    bool deleteImagesAfter = true,
+    Function(int processed, int total)? onProgress,
+  }) async {
+    try {
+      if (imagePaths.length != captureTimes.length) {
+        throw Exception('Image paths and capture times must have the same length');
+      }
+      
+      print('🔄 Batch processing ${imagePaths.length} images for session: $sessionId');
+      
+      final List<Map<String, dynamic>> results = [];
+      int successCount = 0;
+      int totalFacesDetected = 0;
+      
+      for (int i = 0; i < imagePaths.length; i++) {
+        try {
+          onProgress?.call(i, imagePaths.length);
+          
+          final result = await processPeriodicAttendance(
+            imagePath: imagePaths[i],
+            sessionId: sessionId,
+            captureTime: captureTimes[i],
+            deleteImageAfter: deleteImagesAfter,
+          );
+          
+          results.add(result);
+          
+          if (result['success']) {
+            successCount++;
+            totalFacesDetected += (result['faces_detected'] as int? ?? 0);
+          }
+          
+          // Small delay between requests to avoid overwhelming the server
+          await Future.delayed(const Duration(milliseconds: 500));
+          
+        } catch (e) {
+          print('❌ Error processing image ${i + 1}: $e');
+          results.add({
+            'success': false,
+            'error': e.toString(),
+            'image_index': i,
+          });
+        }
+      }
+      
+      onProgress?.call(imagePaths.length, imagePaths.length);
+      
+      return {
+        'success': successCount > 0,
+        'total_images': imagePaths.length,
+        'successful_images': successCount,
+        'total_faces_detected': totalFacesDetected,
+        'results': results,
+      };
+      
+    } catch (e) {
+      print('❌ Batch processing error: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  // ==================== Enhanced Analytics ====================
+  
+  Future<Map<String, dynamic>> getSessionStatistics(String sessionId) async {
+    try {
+      final response = await _client.get(
+        Uri.parse('$BASE_URL/api/session/$sessionId/statistics'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 30));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        return {
+          'success': true,
+          'session_id': sessionId,
+          'statistics': result['statistics'],
+          'student_details': result['student_details'],
+          'hourly_breakdown': result['hourly_breakdown'],
+        };
+      } else {
+        // Fallback to basic statistics
+        return await _calculateBasicStatistics(sessionId);
+      }
+      
+    } catch (e) {
+      print('❌ Error getting session statistics: $e');
+      return await _calculateBasicStatistics(sessionId);
+    }
+  }
+
+  Future<Map<String, dynamic>> _calculateBasicStatistics(String sessionId) async {
+    try {
+      // Get attendance records from Supabase
+      final records = await _getAttendanceRecordsFromSupabase(sessionId);
+      
+      final totalStudents = records.length;
+      final presentCount = records.where((r) => r.status == 'present').length;
+      final lateCount = records.where((r) => r.status == 'late').length;
+      final absentCount = records.where((r) => r.status == 'absent').length;
+      
+      final faceVerifiedCount = records.where((r) => r.hasFaceMatch).length;
+      final averageFaceScore = records
+          .where((r) => r.faceMatchScore != null)
+          .map((r) => r.faceMatchScore!)
+          .fold(0.0, (sum, score) => sum + score) / 
+          (records.where((r) => r.faceMatchScore != null).length.clamp(1, double.infinity));
+      
+      return {
+        'success': true,
+        'session_id': sessionId,
+        'statistics': {
+          'total_students': totalStudents,
+          'present_count': presentCount,
+          'late_count': lateCount,
+          'absent_count': absentCount,
+          'attendance_rate': totalStudents > 0 ? (presentCount + lateCount) / totalStudents : 0.0,
+          'face_verified_count': faceVerifiedCount,
+          'face_verification_rate': totalStudents > 0 ? faceVerifiedCount / totalStudents : 0.0,
+          'average_face_score': averageFaceScore.isNaN ? 0.0 : averageFaceScore,
+        },
+      };
+      
+    } catch (e) {
+      print('❌ Error calculating basic statistics: $e');
+      return {
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+
+  Future<List<AttendanceRecordModel>> _getAttendanceRecordsFromSupabase(String sessionId) async {
+    try {
+      final response = await _authService.attendanceService.getAttendanceRecords(sessionId);
+      return response;
+    } catch (e) {
+      print('❌ Error getting records from Supabase: $e');
+      return [];
+    }
+  }
+
+  // ==================== Cache Management ====================
+  
+  Future<Map<String, dynamic>> _clearServerCache() async {
+    try {
+      final response = await _client.delete(
+        Uri.parse('$BASE_URL/api/cache/clear'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(response.body);
+        print('✅ Server cache cleared: ${result['message']}');
+        return result;
+      }
+    } catch (e) {
+      print('⚠️ Failed to clear server cache: $e');
     }
     
-    final cameraValue = _controller!.value;
+    return {'success': false};
+  }
+
+  // ==================== Image Management ====================
+  
+  Future<String> saveImageToAppDirectory(Uint8List imageBytes, {String? filename}) async {
+    try {
+      final Directory appDir = await getApplicationDocumentsDirectory();
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String fileName = filename ?? 'attendance_$timestamp.jpg';
+      final String savedPath = path.join(appDir.path, 'attendance_images', fileName);
+      
+      // Ensure directory exists
+      final Directory imageDir = Directory(path.dirname(savedPath));
+      if (!await imageDir.exists()) {
+        await imageDir.create(recursive: true);
+      }
+      
+      // Write image bytes to file
+      final File imageFile = File(savedPath);
+      await imageFile.writeAsBytes(imageBytes);
+      
+      print('💾 Image saved: $savedPath');
+      return savedPath;
+      
+    } catch (e) {
+      print('❌ Error saving image: $e');
+      throw Exception('Failed to save image: $e');
+    }
+  }
+
+  Future<void> cleanupOldImages({int maxAgeHours = 24}) async {
+    try {
+      final Directory appDir = await getApplicationDocumentsDirectory();
+      final Directory imageDir = Directory(path.join(appDir.path, 'attendance_images'));
+      
+      if (!await imageDir.exists()) return;
+      
+      final cutoffTime = DateTime.now().subtract(Duration(hours: maxAgeHours));
+      final files = imageDir.listSync();
+      
+      int deletedCount = 0;
+      
+      for (final file in files) {
+        if (file is File) {
+          final fileStat = await file.stat();
+          if (fileStat.modified.isBefore(cutoffTime)) {
+            try {
+              await file.delete();
+              deletedCount++;
+            } catch (e) {
+              print('⚠️ Failed to delete old image: ${file.path}');
+            }
+          }
+        }
+      }
+      
+      print('🧹 Cleaned up $deletedCount old image files');
+      
+    } catch (e) {
+      print('❌ Error during image cleanup: $e');
+    }
+  }
+
+  // ==================== Connection Testing ====================
+  
+  Future<bool> testServerConnection({int maxRetries = 3}) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        final result = await checkServerHealth();
+        if (result['healthy'] == true) {
+          print('✅ Server connection test successful on attempt $attempt');
+          return true;
+        }
+      } catch (e) {
+        print('⚠️ Server connection test attempt $attempt failed: $e');
+      }
+      
+      if (attempt < maxRetries) {
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+    
+    print('❌ Server connection test failed after $maxRetries attempts');
+    return false;
+  }
+
+  // ==================== Utility Methods ====================
+  
+  Future<Map<String, dynamic>> uploadImageBytes({
+    required Uint8List imageBytes,
+    required String endpoint,
+    Map<String, String>? additionalFields,
+    String filename = 'image.jpg',
+    int maxRetries = 3,
+  }) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        print('🔄 Upload attempt $attempt/$maxRetries to $endpoint');
+        
+        final uri = Uri.parse('$BASE_URL$endpoint');
+        final request = http.MultipartRequest('POST', uri);
+        
+        // Add additional fields if provided
+        if (additionalFields != null) {
+          request.fields.addAll(additionalFields);
+        }
+        
+        // Add image as multipart file
+        final multipartFile = http.MultipartFile.fromBytes(
+          'image',
+          imageBytes,
+          filename: filename,
+        );
+        
+        request.files.add(multipartFile);
+        
+        final streamedResponse = await request.send().timeout(
+          Duration(seconds: 30 * attempt), // Increase timeout with retries
+        );
+        
+        final response = await http.Response.fromStream(streamedResponse);
+        
+        if (response.statusCode == 200) {
+          print('✅ Upload successful on attempt $attempt');
+          return {
+            'success': true,
+            'data': json.decode(response.body),
+          };
+        } else {
+          final error = json.decode(response.body);
+          if (attempt == maxRetries) {
+            throw Exception(error['detail'] ?? 'Upload failed');
+          }
+          print('⚠️ Upload attempt $attempt failed, retrying...');
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
+        
+      } catch (e) {
+        if (attempt == maxRetries) {
+          print('❌ Upload failed after $maxRetries attempts: $e');
+          return {
+            'success': false,
+            'error': e.toString(),
+          };
+        }
+        print('⚠️ Upload attempt $attempt error: $e, retrying...');
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
     
     return {
-      'initialized': _isInitialized,
-      'isRecording': cameraValue.isRecordingVideo,
-      'previewSize': {
-        'width': cameraValue.previewSize?.width,
-        'height': cameraValue.previewSize?.height,
-      },
-      'aspectRatio': cameraValue.aspectRatio,
-      'flashMode': cameraValue.flashMode.toString(),
-      'exposureMode': cameraValue.exposureMode.toString(),
-      'focusMode': cameraValue.focusMode.toString(),
-      'currentCamera': {
-        'name': _controller!.description.name,
-        'lensDirection': _controller!.description.lensDirection.toString(),
-        'sensorOrientation': _controller!.description.sensorOrientation,
-      },
-      'availableCameras': _cameras.map((camera) => {
-        'name': camera.name,
-        'lensDirection': camera.lensDirection.toString(),
-        'sensorOrientation': camera.sensorOrientation,
-      }).toList(),
+      'success': false,
+      'error': 'Max retries exceeded',
     };
   }
 
-  /// Reset error state
-  void resetErrorState() {
-    _consecutiveErrors = 0;
-    _lastError = null;
-    if (_status == CameraServiceStatus.error) {
-      _updateStatus(CameraServiceStatus.ready);
-    }
-  }
-
-  /// Clean up resources
-  Future<void> dispose() async {
-    try {
-      print('🧹 Disposing enhanced periodic camera service...');
-      
-      await stopPeriodicCapture();
-      
-      if (_controller != null) {
-        await _controller!.dispose();
-        _controller = null;
-      }
-      
-      _attendanceService.dispose();
-      
-      _isInitialized = false;
-      _updateStatus(CameraServiceStatus.idle);
-      
-      print('✅ Enhanced periodic camera service disposed');
-      
-    } catch (e) {
-      print('❌ Error disposing camera service: $e');
-    }
+  // Clean up
+  void dispose() {
+    _client.close();
   }
 }

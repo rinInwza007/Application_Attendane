@@ -65,20 +65,13 @@ class AttendancePlusApp extends StatelessWidget {
     return MaterialApp(
       title: AppConstants.appName,
       
-      // Use the defined theme
-      //theme: AppTheme.lightTheme,
-      
-      // Dark theme support (optional)
-      // darkTheme: AppTheme.darkTheme,
-      // themeMode: ThemeMode.system,
-      
-      // Remove debug banner
+    
       debugShowCheckedModeBanner: AppConstants.isDevelopment,
       
-      // Home screen
+
       home: const AppWrapper(),
       
-      // Global error handling
+    
       builder: (context, child) {
         return ErrorBoundary(child: child ?? const SizedBox());
       },
@@ -118,10 +111,10 @@ class _AppWrapperState extends State<AppWrapper> {
         });
         
         if (session != null) {
-          // User is signed in, navigate to appropriate screen
+          
           _navigateToUserScreen();
         } else {
-          // User is not signed in, stay on login screen
+         
         }
       }
     } catch (e) {
@@ -135,8 +128,6 @@ class _AppWrapperState extends State<AppWrapper> {
   }
 
   void _navigateToUserScreen() {
-    // TODO: Implement navigation to user-specific screens
-    // This will be handled by the login screen for now
   }
 
   @override
