@@ -111,10 +111,10 @@ class _AppWrapperState extends State<AppWrapper> {
         });
         
         if (session != null) {
-          // User is signed in, navigate to appropriate screen
+          
           _navigateToUserScreen();
         } else {
-          // User is not signed in, stay on login screen
+         
         }
       }
     } catch (e) {
@@ -128,8 +128,6 @@ class _AppWrapperState extends State<AppWrapper> {
   }
 
   void _navigateToUserScreen() {
-    // TODO: Implement navigation to user-specific screens
-    // This will be handled by the login screen for now
   }
 
   @override
