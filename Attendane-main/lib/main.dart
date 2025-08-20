@@ -327,9 +327,7 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
         });
       }
       
-      // Log error in production
       if (!AppConstants.isDevelopment) {
-        // TODO: Send to crash reporting service
         print('Flutter Error: ${details.exception}');
       }
     };
