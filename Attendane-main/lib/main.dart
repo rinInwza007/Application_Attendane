@@ -155,7 +155,7 @@ class SplashScreen extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            
+
             Container(
               width: 120,
               height: 120,
@@ -193,7 +193,7 @@ class SplashScreen extends StatelessWidget {
             
             const SizedBox(height: 48),
             
-            // Loading indicator
+            
             SizedBox(
               width: 32,
               height: 32,
