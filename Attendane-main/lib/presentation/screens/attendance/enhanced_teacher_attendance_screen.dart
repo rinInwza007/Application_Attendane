@@ -1,13 +1,15 @@
 // lib/presentation/screens/attendance/enhanced_teacher_attendance_screen.dart
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter/widgets.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/enhanced_attendance_service.dart';
 import 'package:myproject2/data/services/enhanced_periodic_camera_service.dart';
-import 'package:myproject2/data/services/attendance_service.dart'; // เพิ่ม import นี้
+import 'package:myproject2/data/services/attendance_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
-import 'package:camera/camera.dart';
 
 class EnhancedTeacherAttendanceScreen extends StatefulWidget {
   final String classId;
@@ -20,13 +22,16 @@ class EnhancedTeacherAttendanceScreen extends StatefulWidget {
   });
 
   @override
-  State<EnhancedTeacherAttendanceScreen> createState() => _EnhancedTeacherAttendanceScreenState();
+  State<EnhancedTeacherAttendanceScreen> createState() => 
+      _EnhancedTeacherAttendanceScreenState();
 }
 
-class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttendanceScreen> {
+class _EnhancedTeacherAttendanceScreenState 
+    extends State<EnhancedTeacherAttendanceScreen> {
+  
   final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
   final EnhancedPeriodicCameraService _cameraService = EnhancedPeriodicCameraService();
-  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService(); // เพิ่ม service นี้
+  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService();
   final AuthService _authService = AuthService();
   
   // Session state
@@ -53,6 +58,9 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
   // Error handling
   String? _lastError;
   List<String> _errorHistory = [];
+  int _totalSnapshots = 0;
+  int _successfulCaptures = 0;
+  int _facesDetected = 0;
 
   @override
   void initState() {
@@ -70,26 +78,42 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
   }
 
   void _setupCameraCallbacks() {
+    // Callback เมื่อถ่ายรูปสำเร็จ
     _cameraService.onImageCaptured = (imagePath, captureTime) {
-      print('📸 Image captured: $imagePath at $captureTime');
-      _showSnackBar('Image captured for attendance processing', Colors.blue);
+      print('📸 Snapshot captured: ${imagePath.split('/').last} at $captureTime');
+      setState(() {
+        _totalSnapshots++;
+      });
+      _showSnackBar('📸 Snapshot captured - processing...', Colors.blue);
     };
 
+    // Callback เมื่อประมวลผล attendance สำเร็จ
     _cameraService.onAttendanceProcessed = (result) {
       print('✅ Attendance processed: $result');
       final facesDetected = result['faces_detected'] as int? ?? 0;
+      final newRecords = result['new_attendance_records'] as int? ?? 0;
+      
+      setState(() {
+        _successfulCaptures++;
+        _facesDetected += facesDetected;
+      });
+      
       if (facesDetected > 0) {
-        _showSnackBar('Detected $facesDetected face(s)', Colors.green);
+        _showSnackBar('✅ Detected $facesDetected face(s), $newRecords new records', Colors.green);
         _loadAttendanceRecords(); // Refresh records
+      } else {
+        _showSnackBar('📷 No faces detected in snapshot', Colors.orange);
       }
     };
 
+    // Callback เมื่อเกิดข้อผิดพลาด
     _cameraService.onError = (error) {
       print('❌ Camera error: $error');
       _addError('Camera: $error');
-      _showSnackBar('Camera error: $error', Colors.red);
+      _showSnackBar('❌ Camera error: $error', Colors.red);
     };
 
+    // Callback เมื่อสถานะกล้องเปลี่ยน
     _cameraService.onStatusChanged = (status) {
       print('📸 Camera status: $status');
       setState(() {
@@ -98,6 +122,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       });
     };
 
+    // Callback เมื่อสถิติอัปเดต
     _cameraService.onStatsUpdated = (stats) {
       setState(() {
         _cameraStats = stats;
@@ -120,6 +145,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       
       // Load current session
       await _loadCurrentSession();
+      
+      _showSnackBar('🎯 System ready for attendance tracking', Colors.green);
       
     } catch (e) {
       _addError('Initialization: $e');
@@ -150,7 +177,6 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
 
   Future<void> _loadCurrentSession() async {
     try {
-      // ใช้ SimpleAttendanceService แทน AuthService
       final session = await _simpleAttendanceService.getActiveSessionForClass(widget.classId);
       
       setState(() {
@@ -178,7 +204,6 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     if (_currentSession == null) return;
 
     try {
-      // ใช้ SimpleAttendanceService แทน AuthService
       final records = await _simpleAttendanceService.getAttendanceRecords(_currentSession!.id);
       setState(() => _attendanceRecords = records);
     } catch (e) {
@@ -210,7 +235,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     });
   }
 
-  // ========== Enhanced Session Management ==========
+  // ========== 📍 Start Class Workflow ==========
   
   Future<void> _startAttendanceSession() async {
     if (!_isCameraReady || !_isServerHealthy) {
@@ -236,7 +261,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         throw Exception(result['error'] ?? 'Failed to create session');
       }
 
-      // Create corresponding Supabase session using SimpleAttendanceService
+      // Create corresponding Supabase session
       final supabaseSession = await _simpleAttendanceService.createAttendanceSession(
         classId: widget.classId,
         durationHours: _sessionDurationHours,
@@ -248,13 +273,19 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         _isSessionActive = true;
         _attendanceRecords = [];
         _sessionStats = {};
+        _totalSnapshots = 0;
+        _successfulCaptures = 0;
+        _facesDetected = 0;
       });
 
+      // 📍 Take initial snapshot when starting class
+      await _takeStartClassSnapshot();
+      
       // Start periodic capture
       await _startPeriodicCapture();
       
       _startAutoRefresh();
-      _showSnackBar('Enhanced attendance session started', Colors.green);
+      _showSnackBar('🎯 Class started! Auto-capture every $_captureIntervalMinutes minutes', Colors.green);
       
     } catch (e) {
       _addError('Start session: $e');
@@ -264,6 +295,30 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     }
   }
 
+  Future<void> _takeStartClassSnapshot() async {
+    try {
+      print('📸 Taking start-of-class snapshot...');
+      final imagePath = await _cameraService.captureSingleImage();
+      
+      if (imagePath != null && _currentSession != null) {
+        final result = await _attendanceService.processPeriodicAttendance(
+          imagePath: imagePath,
+          sessionId: _currentSession!.id,
+          captureTime: DateTime.now(),
+        );
+        
+        if (result['success']) {
+          final facesDetected = result['faces_detected'] as int? ?? 0;
+          _showSnackBar('🎯 Start snapshot: $facesDetected face(s) detected', Colors.blue);
+        }
+      }
+    } catch (e) {
+      print('⚠️ Error in start snapshot: $e');
+    }
+  }
+
+  // ========== 📍 During Class - Periodic Capture ==========
+  
   Future<void> _startPeriodicCapture() async {
     if (_currentSession == null || !_isCameraReady) return;
 
@@ -273,7 +328,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         interval: Duration(minutes: _captureIntervalMinutes),
       );
       
-      print('📸 Periodic capture started');
+      print('📸 Periodic capture started - every $_captureIntervalMinutes minutes');
+      _showSnackBar('📷 Auto-capture started every $_captureIntervalMinutes minutes', Colors.blue);
     } catch (e) {
       _addError('Start capture: $e');
       _showSnackBar('Failed to start periodic capture: $e', Colors.red);
@@ -293,12 +349,19 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     }
   }
 
+  // ========== 📍 End Class Workflow ==========
+  
   Future<void> _endAttendanceSession() async {
     if (_currentSession == null) return;
 
     final confirm = await _showConfirmDialog(
-      'End Attendance Session',
-      'Are you sure you want to end the attendance session?\n\nThis will:\n• Stop automatic face detection\n• Finalize attendance records\n• Generate session report',
+      'End Class Session',
+      'Are you sure you want to end the class?\n\n'
+      'This will:\n'
+      '• Take a final attendance snapshot\n'
+      '• Stop automatic face detection\n'
+      '• Finalize attendance records\n'
+      '• Generate session summary',
     );
 
     if (confirm != true) return;
@@ -309,13 +372,13 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       // Stop periodic capture first
       await _cameraService.stopPeriodicCapture();
       
-      // Take final attendance snapshot
-      await _captureFinalAttendance();
+      // 📍 Take final snapshot when ending class
+      await _takeFinalClassSnapshot();
       
       // End session in FastAPI
       await _attendanceService.endSession(_currentSession!.id);
       
-      // End session in Supabase using SimpleAttendanceService
+      // End session in Supabase
       await _simpleAttendanceService.endAttendanceSession(_currentSession!.id);
       
       // Final statistics load
@@ -327,7 +390,9 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       });
 
       _refreshTimer?.cancel();
-      _showSuccessDialog('Session Ended Successfully', _generateSessionSummary());
+      
+      // Show session summary
+      _showSessionSummaryDialog();
       
     } catch (e) {
       _addError('End session: $e');
@@ -337,13 +402,14 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     }
   }
 
-  Future<void> _captureFinalAttendance() async {
+  Future<void> _takeFinalClassSnapshot() async {
     try {
-      print('📸 Taking final attendance snapshot...');
+      print('📸 Taking final class snapshot...');
+      _showSnackBar('📸 Taking final attendance snapshot...', Colors.blue);
+      
       final imagePath = await _cameraService.captureSingleImage();
       
       if (imagePath != null && _currentSession != null) {
-        // Process final image
         final result = await _attendanceService.processPeriodicAttendance(
           imagePath: imagePath,
           sessionId: _currentSession!.id,
@@ -351,7 +417,9 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         );
         
         if (result['success']) {
-          print('✅ Final attendance processed: ${result['faces_detected']} faces');
+          final facesDetected = result['faces_detected'] as int? ?? 0;
+          print('✅ Final snapshot processed: $facesDetected faces');
+          _showSnackBar('🎯 Final snapshot: $facesDetected face(s) detected', Colors.green);
         }
       }
     } catch (e) {
@@ -359,28 +427,15 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     }
   }
 
-  String _generateSessionSummary() {
-    final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
-    final totalStudents = stats['total_students'] ?? 0;
-    final presentCount = stats['present_count'] ?? 0;
-    final lateCount = stats['late_count'] ?? 0;
-    final attendanceRate = stats['attendance_rate'] ?? 0.0;
-    
-    return '''Session Summary:
-• Total Students: $totalStudents
-• Present: $presentCount
-• Late: $lateCount  
-• Attendance Rate: ${(attendanceRate * 100).toStringAsFixed(1)}%
-• Face Verification: ${stats['face_verification_rate'] != null ? (stats['face_verification_rate'] * 100).toStringAsFixed(1) : 0}%''';
-  }
-
   // ========== Manual Actions ==========
   
-  Future<void> _captureManualAttendance() async {
+  Future<void> _captureManualSnapshot() async {
     if (!_isCameraReady || _currentSession == null) return;
 
     try {
       setState(() => _isLoading = true);
+      
+      _showSnackBar('📸 Taking manual snapshot...', Colors.blue);
       
       final imagePath = await _cameraService.captureSingleImage();
       if (imagePath == null) return;
@@ -393,18 +448,123 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
 
       if (result['success']) {
         final facesDetected = result['faces_detected'] as int? ?? 0;
-        _showSnackBar('Manual capture: $facesDetected face(s) detected', Colors.blue);
+        final newRecords = result['new_attendance_records'] as int? ?? 0;
+        _showSnackBar('📷 Manual snapshot: $facesDetected face(s), $newRecords new records', Colors.green);
         await _loadAttendanceRecords();
       } else {
-        _showSnackBar('Manual capture failed: ${result['error']}', Colors.red);
+        _showSnackBar('❌ Manual snapshot failed: ${result['error']}', Colors.red);
       }
 
     } catch (e) {
       _addError('Manual capture: $e');
-      _showSnackBar('Manual capture error: $e', Colors.red);
+      _showSnackBar('❌ Manual snapshot error: $e', Colors.red);
     } finally {
       setState(() => _isLoading = false);
     }
+  }
+
+  // ========== Session Summary ==========
+  
+  void _showSessionSummaryDialog() {
+    final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
+    final totalStudents = stats['total_students'] ?? 0;
+    final presentCount = stats['present_count'] ?? 0;
+    final lateCount = stats['late_count'] ?? 0;
+    final attendanceRate = stats['attendance_rate'] ?? 0.0;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.summarize, color: Colors.green),
+            SizedBox(width: 12),
+            Text('Class Session Summary'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Class: ${widget.className}',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              
+              _buildSummaryRow('Total Students', '$totalStudents'),
+              _buildSummaryRow('Present', '$presentCount'),
+              _buildSummaryRow('Late', '$lateCount'),
+              _buildSummaryRow('Attendance Rate', '${(attendanceRate * 100).toStringAsFixed(1)}%'),
+              
+              const Divider(height: 24),
+              
+              _buildSummaryRow('Total Snapshots', '$_totalSnapshots'),
+              _buildSummaryRow('Successful Captures', '$_successfulCaptures'),
+              _buildSummaryRow('Faces Detected', '$_facesDetected'),
+              _buildSummaryRow('Face Detection Rate', 
+                _successfulCaptures > 0 
+                  ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
+                  : '0 faces/snapshot'),
+              
+              const SizedBox(height: 16),
+              
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.green),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Class session completed successfully!',
+                        style: TextStyle(
+                          color: Colors.green,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w500)),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
   }
 
   // ========== Error Handling ==========
@@ -426,16 +586,27 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message),
+        content: Row(
+          children: [
+            Icon(
+              backgroundColor == Colors.green ? Icons.check_circle :
+              backgroundColor == Colors.red ? Icons.error :
+              backgroundColor == Colors.orange ? Icons.warning :
+              Icons.info,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message)),
+          ],
+        ),
         backgroundColor: backgroundColor,
         duration: const Duration(seconds: 3),
-        action: backgroundColor == Colors.red
-            ? SnackBarAction(
-                label: 'Details',
-                textColor: Colors.white,
-                onPressed: _showErrorHistory,
-              )
-            : null,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
       ),
     );
   }
@@ -480,85 +651,6 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('OK'),
           ),
-          if (_errorHistory.isNotEmpty)
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _showErrorHistory();
-              },
-              child: const Text('View Errors'),
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _showSuccessDialog(String title, String message) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            const Icon(Icons.check_circle, color: Colors.green),
-            const SizedBox(width: 12),
-            Text(title),
-          ],
-        ),
-        content: Text(message),
-        actions: [
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showErrorHistory() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Error History'),
-        content: SizedBox(
-          width: double.maxFinite,
-          height: 300,
-          child: _errorHistory.isEmpty
-              ? const Center(child: Text('No errors recorded'))
-              : ListView.builder(
-                  itemCount: _errorHistory.length,
-                  itemBuilder: (context, index) {
-                    final error = _errorHistory[index];
-                    final parts = error.split(': ');
-                    final timestamp = parts.isNotEmpty ? parts[0] : '';
-                    final message = parts.length > 1 ? parts.sublist(1).join(': ') : error;
-                    
-                    return ListTile(
-                      dense: true,
-                      title: Text(
-                        message,
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                      subtitle: Text(
-                        timestamp,
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                    );
-                  },
-                ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              setState(() => _errorHistory.clear());
-              Navigator.of(context).pop();
-            },
-            child: const Text('Clear'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
         ],
       ),
     );
@@ -570,8 +662,10 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Enhanced Attendance - ${widget.className}'),
+        title: Text('Attendance Tracking - ${widget.className}'),
         centerTitle: true,
+        backgroundColor: _isSessionActive ? Colors.green.shade400 : null,
+        foregroundColor: _isSessionActive ? Colors.white : null,
         actions: [
           IconButton(
             icon: Icon(
@@ -640,24 +734,18 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
             ),
           ),
           const Spacer(),
-          if (_lastError != null)
-            GestureDetector(
-              onTap: _showErrorHistory,
-              child: Row(
-                children: [
-                  Icon(Icons.warning, color: Colors.orange.shade700, size: 16),
-                  const SizedBox(width: 4),
-                  Text(
-                    'View Errors',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.orange.shade700,
-                      decoration: TextDecoration.underline,
-                    ),
-                  ),
-                ],
+          if (_isSessionActive) ...[
+            Icon(Icons.fiber_manual_record, color: Colors.red, size: 12),
+            const SizedBox(width: 4),
+            Text(
+              'LIVE',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.red.shade700,
+                fontWeight: FontWeight.bold,
               ),
             ),
+          ],
         ],
       ),
     );
@@ -697,7 +785,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                             ),
                             const SizedBox(width: 4),
                             Text(
-                              _cameraService.isRunning ? 'RECORDING' : 'PAUSED',
+                              _cameraService.isRunning ? 'AUTO-CAPTURE' : 'PAUSED',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 10,
@@ -708,6 +796,28 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                         ),
                       ),
                     ),
+                    
+                    // Snapshot counter
+                    if (_isSessionActive)
+                      Positioned(
+                        top: 12,
+                        right: 12,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withOpacity(0.8),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            'Snapshots: $_totalSnapshots',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               )
@@ -749,7 +859,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
         child: Column(
           children: [
             Text(
-              'Enhanced Session Management',
+              'Class Session Control',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 16),
@@ -761,7 +871,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                       ? _startAttendanceSession 
                       : null,
                   icon: const Icon(Icons.play_arrow),
-                  label: const Text('Start Enhanced Session'),
+                  label: const Text('🎯 Start Class & Begin Tracking'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     foregroundColor: Colors.white,
@@ -774,17 +884,9 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: _isLoading ? null : _captureManualAttendance,
-                      icon: const Icon(Icons.camera_alt),
-                      label: const Text('Manual Capture'),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _endAttendanceSession,
+                      onPressed: _isLoading ? null : _captureManualSnapshot,
                       icon: const Icon(Icons.stop),
-                      label: const Text('End Session'),
+                      label: const Text('🏁 End Class'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red,
                         foregroundColor: Colors.white,
@@ -823,7 +925,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  _isSessionActive ? 'Enhanced Session Active' : 'Session Ended',
+                  _isSessionActive ? 'Session Active - Auto Tracking' : 'Session Ended',
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -847,8 +949,8 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 const SizedBox(width: 8),
                 Expanded(
                   child: _buildInfoChip(
-                    'Captures',
-                    '${captureStats['successfulCaptures'] ?? 0}/${captureStats['totalCaptures'] ?? 0}',
+                    'Auto Interval',
+                    '${_captureIntervalMinutes}min',
                     Colors.purple,
                   ),
                 ),
@@ -861,9 +963,31 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
               children: [
                 Expanded(
                   child: _buildInfoChip(
+                    'Snapshots',
+                    '$_successfulCaptures/$_totalSnapshots',
+                    Colors.blue,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildInfoChip(
                     'Faces Detected',
-                    '${captureStats['detectedFaces'] ?? 0}',
+                    '$_facesDetected',
                     Colors.orange,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            
+            // Attendance statistics
+            Row(
+              children: [
+                Expanded(
+                  child: _buildInfoChip(
+                    'Students Present',
+                    '${_attendanceRecords.length}',
+                    Colors.green,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -871,7 +995,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                   child: _buildInfoChip(
                     'Attendance Rate',
                     '${((_sessionStats['statistics']?['attendance_rate'] ?? 0.0) * 100).toStringAsFixed(1)}%',
-                    Colors.green,
+                    Colors.teal,
                   ),
                 ),
               ],
@@ -925,15 +1049,31 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
+                const Icon(Icons.people, color: Colors.blue),
+                const SizedBox(width: 8),
                 const Text(
-                  'Attendance Records',
+                  'Live Attendance Records',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
                 const Spacer(),
-                Text('${_attendanceRecords.length} checked in'),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${_attendanceRecords.length} checked in',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue.shade700,
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.refresh, size: 20),
@@ -953,12 +1093,13 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                         SizedBox(height: 16),
                         Text(
                           'No attendance records yet',
-                          style: TextStyle(color: Colors.grey),
+                          style: TextStyle(color: Colors.grey, fontSize: 16),
                         ),
                         SizedBox(height: 8),
                         Text(
-                          'Records will appear when faces are detected',
+                          'Records will appear automatically when faces are detected',
                           style: TextStyle(color: Colors.grey, fontSize: 12),
+                          textAlign: TextAlign.center,
                         ),
                       ],
                     ),
@@ -984,14 +1125,45 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                                     : Colors.red,
                           ),
                         ),
-                        title: Text(record.studentId),
+                        title: Row(
+                          children: [
+                            Text(
+                              record.studentId,
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(width: 8),
+                            if (record.hasFaceMatch)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.shade100,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.verified_user, size: 12, color: Colors.blue.shade700),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      'AI',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('${record.timeOnly} - ${record.statusInThai}'),
                             if (record.hasFaceMatch)
                               Text(
-                                'Face verified (${record.faceMatchPercentage.toStringAsFixed(1)}%)',
+                                'Auto-detected (${record.faceMatchPercentage.toStringAsFixed(1)}% match)',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.blue.shade600,
@@ -999,9 +1171,25 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                               ),
                           ],
                         ),
-                        trailing: record.hasFaceMatch 
-                            ? Icon(Icons.verified_user, color: Colors.blue.shade600)
-                            : null,
+                        trailing: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: record.isPresent 
+                                ? Colors.green 
+                                : record.isLate 
+                                    ? Colors.orange 
+                                    : Colors.red,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            record.statusDisplayText,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
                       );
                     },
                   ),
@@ -1015,23 +1203,42 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('System Status'),
+        title: const Row(
+          children: [
+            Icon(Icons.info, color: Colors.blue),
+            SizedBox(width: 12),
+            Text('System Status'),
+          ],
+        ),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _buildStatusSection('Server Health', _serverHealth),
+              _buildStatusSection('🖥️ Server Health', _serverHealth),
               const SizedBox(height: 16),
-              _buildStatusSection('Camera Statistics', _cameraStats),
+              _buildStatusSection('📸 Camera Statistics', _cameraStats),
               if (_sessionStats.isNotEmpty) ...[
                 const SizedBox(height: 16),
-                _buildStatusSection('Session Statistics', _sessionStats),
+                _buildStatusSection('📊 Session Statistics', _sessionStats),
+              ],
+              if (_errorHistory.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                _buildStatusSection('⚠️ Recent Errors', 
+                  {'errors': _errorHistory.take(3).toList()}),
               ],
             ],
           ),
         ),
         actions: [
+          if (_errorHistory.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                setState(() => _errorHistory.clear());
+                Navigator.of(context).pop();
+              },
+              child: const Text('Clear Errors'),
+            ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Close'),
@@ -1047,7 +1254,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       children: [
         Text(
           title,
-          style: const TextStyle(fontWeight: FontWeight.bold),
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
         ),
         const SizedBox(height: 8),
         Container(
@@ -1063,7 +1270,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 .join('\n'),
             style: const TextStyle(
               fontFamily: 'monospace',
-              fontSize: 12,
+              fontSize: 11,
             ),
           ),
         ),
@@ -1075,11 +1282,38 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Session Settings'),
+        title: const Row(
+          children: [
+            Icon(Icons.settings, color: Colors.purple),
+            SizedBox(width: 12),
+            Text('Session Settings'),
+          ],
+        ),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info, color: Colors.blue),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Settings can only be changed before starting a session',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              
               ListTile(
                 title: const Text('Session Duration'),
                 subtitle: Text('$_sessionDurationHours hours'),
@@ -1096,11 +1330,11 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
                 ),
               ),
               ListTile(
-                title: const Text('Capture Interval'),
+                title: const Text('Auto-Capture Interval'),
                 subtitle: Text('Every $_captureIntervalMinutes minutes'),
                 trailing: DropdownButton<int>(
                   value: _captureIntervalMinutes,
-                  items: [1, 3, 5, 10, 15].map((minutes) => 
+                  items: [3, 5, 10, 15, 20].map((minutes) => 
                     DropdownMenuItem(value: minutes, child: Text('$minutes min'))
                   ).toList(),
                   onChanged: _isSessionActive ? null : (value) {
@@ -1112,7 +1346,7 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
               ),
               ListTile(
                 title: const Text('On-time Limit'),
-                subtitle: Text('$_onTimeLimitMinutes minutes'),
+                subtitle: Text('$_onTimeLimitMinutes minutes after start'),
                 trailing: DropdownButton<int>(
                   value: _onTimeLimitMinutes,
                   items: [15, 30, 45, 60].map((minutes) => 
@@ -1137,4 +1371,12 @@ class _EnhancedTeacherAttendanceScreenState extends State<EnhancedTeacherAttenda
       ),
     );
   }
-}
+}camera_alt),
+                      label: const Text('📸 Manual Snapshot'),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isLoading ? null : _endAttendanceSession,
+                      icon: const Icon(Icons.
