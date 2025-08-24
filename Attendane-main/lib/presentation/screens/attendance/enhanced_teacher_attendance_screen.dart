@@ -11,6 +11,7 @@ import 'package:myproject2/data/services/enhanced_periodic_camera_service.dart';
 import 'package:myproject2/data/services/attendance_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
 
+
 class EnhancedTeacherAttendanceScreen extends StatefulWidget {
   final String classId;
   final String className;
@@ -476,13 +477,13 @@ class _EnhancedTeacherAttendanceScreenState
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.summarize, color: Colors.green),
-            SizedBox(width: 12),
-            Text('Class Session Summary'),
-          ],
-        ),
+        title: Row(
+    children: [
+    Icon(Icons.summarize, color: Colors.green),
+    SizedBox(width: 12),
+    Text('Class Session Summary'),
+  ],
+),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -491,11 +492,11 @@ class _EnhancedTeacherAttendanceScreenState
               Text(
                 'Class: ${widget.className}',
                 style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 16),
+          fontSize: 16,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+              SizedBox(height: 16),
               
               _buildSummaryRow('Total Students', '$totalStudents'),
               _buildSummaryRow('Present', '$presentCount'),
@@ -512,7 +513,7 @@ class _EnhancedTeacherAttendanceScreenState
                   ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
                   : '0 faces/snapshot'),
               
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               
               Container(
                 padding: const EdgeInsets.all(12),
@@ -521,7 +522,7 @@ class _EnhancedTeacherAttendanceScreenState
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: Colors.green.shade200),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
                     Icon(Icons.check_circle, color: Colors.green),
                     SizedBox(width: 8),
@@ -547,7 +548,7 @@ class _EnhancedTeacherAttendanceScreenState
               backgroundColor: Colors.green,
               foregroundColor: Colors.white,
             ),
-            child: const Text('Close'),
+            child:  Text('Close'),
           ),
         ],
       ),
@@ -596,7 +597,7 @@ class _EnhancedTeacherAttendanceScreenState
               color: Colors.white,
               size: 20,
             ),
-            const SizedBox(width: 12),
+            SizedBox(width: 12),
             Expanded(child: Text(message)),
           ],
         ),
@@ -851,55 +852,68 @@ class _EnhancedTeacherAttendanceScreenState
     );
   }
 
-  Widget _buildSessionControl() {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Text(
-              'Class Session Control',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 16),
-            if (!_isSessionActive)
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _isCameraReady && _isServerHealthy && !_isLoading 
-                      ? _startAttendanceSession 
-                      : null,
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('🎯 Start Class & Begin Tracking'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
+      Widget _buildSessionControl() {
+  return Card(
+    margin:  EdgeInsets.symmetric(horizontal: 16),
+    child: Padding(
+      padding:  EdgeInsets.all(16),
+      child: Column(
+        children: [
+          Text(
+            'Class Session Control',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          SizedBox(height: 16),
+          if (!_isSessionActive)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _isCameraReady && _isServerHealthy && !_isLoading
+                    ? _startAttendanceSession
+                    : null,
+                icon: const Icon(Icons.play_arrow),
+                label:  Text('🎯 Start Class & Begin Tracking'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
-              )
-            else
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _isLoading ? null : _captureManualSnapshot,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('🏁 End Class'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                      ),
+              ),
+            )
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isLoading ? null : _captureManualSnapshot,
+                    icon: const Icon(Icons.camera_alt),
+                    label:  Text('📸 Manual Snapshot'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
                     ),
                   ),
-                ],
-              ),
-          ],
-        ),
+                ),
+                SizedBox(width: 16),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isLoading ? null : _endAttendanceSession,
+                    icon: const Icon(Icons.stop),
+                    label:  Text('🏁 End Class'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+        ],
       ),
-    );
-  }
+    ),
+  );
+}
+
 
   Widget _buildSessionStatus() {
     if (_currentSession == null) return const SizedBox();
@@ -1371,12 +1385,11 @@ class _EnhancedTeacherAttendanceScreenState
       ),
     );
   }
-}camera_alt),
-                      label: const Text('📸 Manual Snapshot'),
-                    ),
-                  ),
+} const Text('📸 Manual Snapshot'),
                   const SizedBox(width: 16),
                   Expanded(
                     child: ElevatedButton.icon(
                       onPressed: _isLoading ? null : _endAttendanceSession,
-                      icon: const Icon(Icons.
+                      icon: const Icon(Icons.stop),
+                      label: const Text('🏁 End Class'),
+                      
