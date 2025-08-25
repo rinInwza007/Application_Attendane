@@ -64,11 +64,11 @@ class _EnhancedTeacherAttendanceScreenState
   int _facesDetected = 0;
 
   @override
-  void initState() {
-    super.initState();
-    _setupCameraCallbacks();
-    _initializeServices();
-  }
+void initState() {
+  super.initState();
+  _setupCameraCallbacks();
+  _initializeServices();
+}
 
   @override
   void dispose() {
@@ -79,14 +79,24 @@ class _EnhancedTeacherAttendanceScreenState
   }
 
   void _setupCameraCallbacks() {
-    // Callback เมื่อถ่ายรูปสำเร็จ
-    _cameraService.onImageCaptured = (imagePath, captureTime) {
-      print('📸 Snapshot captured: ${imagePath.split('/').last} at $captureTime');
-      setState(() {
-        _totalSnapshots++;
-      });
-      _showSnackBar('📸 Snapshot captured - processing...', Colors.blue);
-    };
+  _cameraService.onImageCaptured = (imagePath, captureTime) {
+    print('📸 Auto-captured: ${imagePath.split('/').last}');
+    setState(() => _totalSnapshots++);
+  };
+
+  _cameraService.onAttendanceProcessed = (result) {
+    final facesDetected = result['faces_detected'] as int? ?? 0;
+    setState(() => _facesDetected += facesDetected);
+    _showSnackBar('✅ Auto-processed: $facesDetected faces', Colors.green);
+  };
+
+  _cameraService.onError = (error) {
+    _showSnackBar('❌ Camera error: $error', Colors.red);
+  };
+
+  _cameraService.onStatusChanged = (status) {
+    setState(() => _isCameraReady = status == CameraServiceStatus.ready);
+  };
 
     // Callback เมื่อประมวลผล attendance สำเร็จ
     _cameraService.onAttendanceProcessed = (result) {
@@ -239,62 +249,73 @@ class _EnhancedTeacherAttendanceScreenState
   // ========== 📍 Start Class Workflow ==========
   
   Future<void> _startAttendanceSession() async {
-    if (!_isCameraReady || !_isServerHealthy) {
-      _showSnackBar('Camera or server not ready', Colors.orange);
-      return;
-    }
-
-    setState(() => _isLoading = true);
-
-    try {
-      print('🚀 Starting enhanced attendance session...');
-      
-      // Create session using FastAPI
-      final result = await _attendanceService.createEnhancedSession(
-        classId: widget.classId,
-        teacherEmail: _authService.getCurrentUserEmail()!,
-        durationHours: _sessionDurationHours,
-        captureIntervalMinutes: _captureIntervalMinutes,
-        onTimeLimitMinutes: _onTimeLimitMinutes,
-      );
-
-      if (!result['success']) {
-        throw Exception(result['error'] ?? 'Failed to create session');
-      }
-
-      // Create corresponding Supabase session
-      final supabaseSession = await _simpleAttendanceService.createAttendanceSession(
-        classId: widget.classId,
-        durationHours: _sessionDurationHours,
-        onTimeLimitMinutes: _onTimeLimitMinutes,
-      );
-
-      setState(() {
-        _currentSession = supabaseSession;
-        _isSessionActive = true;
-        _attendanceRecords = [];
-        _sessionStats = {};
-        _totalSnapshots = 0;
-        _successfulCaptures = 0;
-        _facesDetected = 0;
-      });
-
-      // 📍 Take initial snapshot when starting class
-      await _takeStartClassSnapshot();
-      
-      // Start periodic capture
-      await _startPeriodicCapture();
-      
-      _startAutoRefresh();
-      _showSnackBar('🎯 Class started! Auto-capture every $_captureIntervalMinutes minutes', Colors.green);
-      
-    } catch (e) {
-      _addError('Start session: $e');
-      _showErrorDialog('Failed to Start Session', e.toString());
-    } finally {
-      setState(() => _isLoading = false);
-    }
+  if (!_isCameraReady || !_isServerHealthy) {
+    _showSnackBar('Camera or server not ready', Colors.orange);
+    return;
   }
+
+  setState(() => _isLoading = true);
+
+  try {
+    print('🚀 Starting enhanced attendance session...');
+    
+    // 📸 ถ่ายรูปเริ่มคาบเรียนก่อน
+    final imagePath = await _cameraService.captureSingleImage();
+    if (imagePath == null) {
+      throw Exception('Failed to capture initial image');
+    }
+    
+    // 🎯 เริ่มคาบเรียนพร้อมส่งรูปไป FastAPI
+    final result = await _attendanceService.startClassSession(
+      classId: widget.classId,
+      teacherEmail: _authService.getCurrentUserEmail()!,
+      initialImagePath: imagePath,
+      durationHours: _sessionDurationHours,
+      captureIntervalMinutes: _captureIntervalMinutes,
+      onTimeLimitMinutes: _onTimeLimitMinutes,
+    );
+
+    if (!result['success']) {
+      throw Exception(result['error'] ?? 'Failed to start session');
+    }
+
+    // 📊 สร้าง session ใน Supabase (เพื่อใช้กับ Flutter UI)
+    final supabaseSession = await _simpleAttendanceService.createAttendanceSession(
+      classId: widget.classId,
+      durationHours: _sessionDurationHours,
+      onTimeLimitMinutes: _onTimeLimitMinutes,
+    );
+
+    setState(() {
+      _currentSession = supabaseSession;
+      _isSessionActive = true;
+      _attendanceRecords = [];
+      _sessionStats = {};
+      _totalSnapshots = 1; // เริ่มต้นด้วย initial snapshot
+      _successfulCaptures = 1;
+      _facesDetected = result['faces_detected'] ?? 0;
+    });
+
+    // 🔄 เริ่ม periodic capture
+    await _startPeriodicCapture();
+    
+    _startAutoRefresh();
+    _showSnackBar('🎯 Class started! Initial attendance captured automatically', Colors.green);
+    
+    // ลบรูปชั่วคราว
+    try {
+      await File(imagePath).delete();
+    } catch (e) {
+      print('Warning: Could not delete temporary image: $e');
+    }
+    
+  } catch (e) {
+    _addError('Start session: $e');
+    _showErrorDialog('Failed to Start Session', e.toString());
+  } finally {
+    setState(() => _isLoading = false);
+  }
+}
 
   Future<void> _takeStartClassSnapshot() async {
     try {
@@ -430,39 +451,53 @@ class _EnhancedTeacherAttendanceScreenState
 
   // ========== Manual Actions ==========
   
-  Future<void> _captureManualSnapshot() async {
-    if (!_isCameraReady || _currentSession == null) return;
+ Future<void> _captureManualSnapshot() async {
+  if (!_isCameraReady || _currentSession == null) return;
 
-    try {
-      setState(() => _isLoading = true);
+  try {
+    setState(() => _isLoading = true);
+    
+    _showSnackBar('📸 Taking manual snapshot...', Colors.blue);
+    
+    final imagePath = await _cameraService.captureSingleImage();
+    if (imagePath == null) return;
+
+    // ส่งไป FastAPI แทนที่จะใช้ mock data
+    final result = await _attendanceService.captureManualAttendance(
+      sessionId: _currentSession!.id,
+      imagePath: imagePath,
+    );
+
+    if (result['success']) {
+      final facesDetected = result['faces_detected'] as int? ?? 0;
+      _showSnackBar('📷 Manual snapshot: $facesDetected face(s) detected, processing...', Colors.green);
       
-      _showSnackBar('📸 Taking manual snapshot...', Colors.blue);
+      setState(() {
+        _totalSnapshots++;
+        _successfulCaptures++;
+        _facesDetected += facesDetected;
+      });
       
-      final imagePath = await _cameraService.captureSingleImage();
-      if (imagePath == null) return;
-
-      final result = await _attendanceService.processPeriodicAttendance(
-        imagePath: imagePath,
-        sessionId: _currentSession!.id,
-        captureTime: DateTime.now(),
-      );
-
-      if (result['success']) {
-        final facesDetected = result['faces_detected'] as int? ?? 0;
-        final newRecords = result['new_attendance_records'] as int? ?? 0;
-        _showSnackBar('📷 Manual snapshot: $facesDetected face(s), $newRecords new records', Colors.green);
-        await _loadAttendanceRecords();
-      } else {
-        _showSnackBar('❌ Manual snapshot failed: ${result['error']}', Colors.red);
-      }
-
-    } catch (e) {
-      _addError('Manual capture: $e');
-      _showSnackBar('❌ Manual snapshot error: $e', Colors.red);
-    } finally {
-      setState(() => _isLoading = false);
+      await _loadAttendanceRecords();
+      await _loadSessionStatistics();
+    } else {
+      _showSnackBar('❌ Manual snapshot failed: ${result['error'] ?? 'Unknown error'}', Colors.red);
     }
+
+    // ลบรูปชั่วคราว
+    try {
+      await File(imagePath).delete();
+    } catch (e) {
+      print('Warning: Could not delete temporary image: $e');
+    }
+
+  } catch (e) {
+    _addError('Manual capture: $e');
+    _showSnackBar('❌ Manual snapshot error: $e', Colors.red);
+  } finally {
+    setState(() => _isLoading = false);
   }
+}
 
   // ========== Session Summary ==========
   

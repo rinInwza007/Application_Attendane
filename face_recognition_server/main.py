@@ -626,3 +626,406 @@ if __name__ == "__main__":
     import uvicorn
     print(f"🚀 Starting Enhanced Face Recognition Server on {HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+# เพิ่มใน main.py
+
+@app.post("/api/class/start-session")
+async def start_class_session(
+    background_tasks: BackgroundTasks,
+    class_id: str = Form(...),
+    teacher_email: str = Form(...),
+    duration_hours: int = Form(2),
+    capture_interval_minutes: int = Form(5),
+    on_time_limit_minutes: int = Form(30),
+    initial_image: UploadFile = File(...)
+):
+    """Start class session with initial attendance snapshot"""
+    try:
+        logger.info(f"Starting class session for {class_id} by {teacher_email}")
+        
+        # 1. Validate class and teacher
+        class_result = supabase.table('classes').select('*').eq('class_id', class_id).eq('teacher_email', teacher_email).single().execute()
+        
+        if not class_result.data:
+            raise HTTPException(status_code=404, detail="Class not found or you are not the teacher")
+        
+        # 2. Check if there's already an active session
+        existing_session = supabase.table('attendance_sessions').select('id').eq('class_id', class_id).eq('status', 'active').execute()
+        
+        if existing_session.data:
+            raise HTTPException(status_code=400, detail="There is already an active session for this class")
+        
+        # 3. Create new session
+        start_time = datetime.now()
+        end_time = start_time + timedelta(hours=duration_hours)
+        on_time_deadline = start_time + timedelta(minutes=on_time_limit_minutes)
+        
+        session_data = {
+            'class_id': class_id,
+            'teacher_email': teacher_email,
+            'start_time': start_time.isoformat(),
+            'end_time': end_time.isoformat(),
+            'on_time_limit_minutes': on_time_limit_minutes,
+            'capture_interval_minutes': capture_interval_minutes,
+            'status': 'active',
+            'created_at': start_time.isoformat()
+        }
+        
+        session_result = supabase.table('attendance_sessions').insert(session_data).execute()
+        
+        if not session_result.data:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+        
+        session_id = session_result.data[0]['id']
+        
+        # 4. Process initial image in background
+        if initial_image:
+            image_data = await initial_image.read()
+            image_pil = Image.open(io.BytesIO(image_data))
+            
+            if image_pil.mode != 'RGB':
+                image_pil = image_pil.convert('RGB')
+            
+            image_array = np.array(image_pil)
+            
+            # Get enrolled students
+            enrolled_students = await get_enrolled_students_for_class(class_id)
+            
+            # Process initial attendance in background
+            background_tasks.add_task(
+                process_start_class_attendance,
+                image_array,
+                enrolled_students,
+                session_id,
+                session_data,
+                start_time.isoformat()
+            )
+        
+        # 5. Log capture event
+        capture_log = {
+            'session_id': session_id,
+            'capture_time': start_time.isoformat(),
+            'faces_detected': 0,  # Will be updated by background task
+            'faces_recognized': 0,
+            'created_at': start_time.isoformat()
+        }
+        
+        supabase.table('periodic_captures').insert(capture_log).execute()
+        
+        logger.info(f"✅ Class session started: {session_id}")
+        
+        return {
+            "success": True,
+            "message": "Class session started successfully",
+            "session_id": session_id,
+            "class_id": class_id,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "on_time_deadline": on_time_deadline.isoformat(),
+            "capture_interval_minutes": capture_interval_minutes,
+            "enrolled_students_count": len(enrolled_students) if 'enrolled_students' in locals() else 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error starting class session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start class session: {str(e)}")
+
+async def process_start_class_attendance(
+    image_array: np.ndarray,
+    enrolled_students: List[str], 
+    session_id: str,
+    session_data: Dict,
+    capture_time: str
+):
+    """Background processing for start-of-class attendance"""
+    try:
+        logger.info(f"📸 Processing start-of-class image for session {session_id}")
+        
+        # Detect faces
+        face_locations = face_recognition.face_locations(image_array, model="hog")
+        faces_detected = len(face_locations)
+        
+        # Process faces for recognition
+        detected_faces = process_multiple_faces(image_array, enrolled_students)
+        faces_recognized = len([f for f in detected_faces if f['verified']])
+        
+        # Record attendance for recognized students
+        new_records = 0
+        for face_info in detected_faces:
+            if not face_info['verified']:
+                continue
+            
+            student_id = face_info['student_id']
+            confidence = face_info['confidence']
+            
+            # Get student email
+            student_result = supabase.table('users').select('email').eq('school_id', student_id).single().execute()
+            
+            if not student_result.data:
+                continue
+            
+            student_email = student_result.data['email']
+            
+            # Since this is start of class, everyone should be "present"
+            record_data = {
+                'session_id': session_id,
+                'student_email': student_email,
+                'student_id': student_id,
+                'check_in_time': capture_time,
+                'status': 'present',  # Start of class = present
+                'face_match_score': confidence,
+                'detection_method': 'start_class',
+                'face_quality': face_info.get('quality', {}),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            try:
+                supabase.table('attendance_records').insert(record_data).execute()
+                new_records += 1
+                logger.info(f"✅ Recorded start-class attendance for {student_id}")
+            except Exception as e:
+                logger.error(f"❌ Error saving start-class record for {student_id}: {e}")
+        
+        # Update capture log
+        supabase.table('periodic_captures').update({
+            'faces_detected': faces_detected,
+            'faces_recognized': faces_recognized,
+            'processing_time_ms': int(time.time() * 1000) % 1000000
+        }).eq('session_id', session_id).eq('capture_time', capture_time).execute()
+        
+        logger.info(f"📊 Start-class processing complete: {faces_detected} faces detected, {new_records} students recorded")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing start-class attendance: {e}")
+
+@app.post("/api/class/manual-capture")
+async def manual_attendance_capture(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    image: UploadFile = File(...)
+):
+    """Manual attendance capture during class"""
+    try:
+        # Validate session
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').single().execute()
+        
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Active session not found")
+        
+        session_data = session_result.data
+        class_id = session_data['class_id']
+        
+        # Process image
+        image_data = await image.read()
+        image_pil = Image.open(io.BytesIO(image_data))
+        
+        if image_pil.mode != 'RGB':
+            image_pil = image_pil.convert('RGB')
+        
+        image_array = np.array(image_pil)
+        
+        # Quick face count
+        face_locations = face_recognition.face_locations(image_array, model="hog")
+        faces_detected = len(face_locations)
+        
+        # Get enrolled students
+        enrolled_students = await get_enrolled_students_for_class(class_id)
+        
+        # Process in background
+        capture_time = datetime.now().isoformat()
+        background_tasks.add_task(
+            process_manual_attendance_background,
+            image_array,
+            enrolled_students,
+            session_id,
+            session_data,
+            capture_time
+        )
+        
+        # Log capture
+        capture_log = {
+            'session_id': session_id,
+            'capture_time': capture_time,
+            'faces_detected': faces_detected,
+            'faces_recognized': 0,  # Will be updated by background task
+            'created_at': capture_time
+        }
+        
+        supabase.table('periodic_captures').insert(capture_log).execute()
+        
+        return {
+            "success": True,
+            "message": f"Manual capture processed - {faces_detected} faces detected",
+            "session_id": session_id,
+            "faces_detected": faces_detected,
+            "capture_time": capture_time
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Manual capture error: {e}")
+        raise HTTPException(status_code=500, detail=f"Manual capture failed: {str(e)}")
+
+async def process_manual_attendance_background(
+    image_array: np.ndarray,
+    enrolled_students: List[str],
+    session_id: str,
+    session_data: Dict,
+    capture_time: str
+):
+    """Background processing for manual attendance capture"""
+    try:
+        # Process faces similar to periodic attendance
+        detected_faces = process_multiple_faces(image_array, enrolled_students)
+        faces_recognized = len([f for f in detected_faces if f['verified']])
+        
+        new_records = 0
+        
+        for face_info in detected_faces:
+            if not face_info['verified']:
+                continue
+            
+            student_id = face_info['student_id']
+            confidence = face_info['confidence']
+            
+            # Get student email
+            student_result = supabase.table('users').select('email').eq('school_id', student_id).single().execute()
+            
+            if not student_result.data:
+                continue
+            
+            student_email = student_result.data['email']
+            
+            # Check if already recorded
+            existing_record = supabase.table('attendance_records').select('id').eq('session_id', session_id).eq('student_email', student_email).execute()
+            
+            if existing_record.data:
+                continue  # Skip if already recorded
+            
+            # Determine status based on timing
+            capture_dt = datetime.fromisoformat(capture_time.replace('Z', '+00:00'))
+            session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
+            on_time_limit = session_start + timedelta(minutes=session_data['on_time_limit_minutes'])
+            
+            status = 'present' if capture_dt <= on_time_limit else 'late'
+            
+            # Save record
+            record_data = {
+                'session_id': session_id,
+                'student_email': student_email,
+                'student_id': student_id,
+                'check_in_time': capture_time,
+                'status': status,
+                'face_match_score': confidence,
+                'detection_method': 'manual',
+                'face_quality': face_info.get('quality', {}),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            try:
+                supabase.table('attendance_records').insert(record_data).execute()
+                new_records += 1
+                logger.info(f"✅ Manual attendance recorded for {student_id}: {status}")
+            except Exception as e:
+                logger.error(f"❌ Error saving manual record for {student_id}: {e}")
+        
+        # Update capture log
+        supabase.table('periodic_captures').update({
+            'faces_recognized': faces_recognized
+        }).eq('session_id', session_id).eq('capture_time', capture_time).execute()
+        
+        logger.info(f"📊 Manual capture complete: {faces_recognized} faces recognized, {new_records} new records")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing manual capture: {e}")
+
+@app.get("/api/session/{session_id}/statistics")
+async def get_session_statistics(session_id: str):
+    """Get detailed session statistics"""
+    try:
+        # Get session info
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).single().execute()
+        
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session_data = session_result.data
+        
+        # Get attendance records
+        records_result = supabase.table('attendance_records').select('*').eq('session_id', session_id).execute()
+        records = records_result.data or []
+        
+        # Get capture logs
+        captures_result = supabase.table('periodic_captures').select('*').eq('session_id', session_id).order('capture_time').execute()
+        captures = captures_result.data or []
+        
+        # Get total enrolled students
+        enrolled_students = await get_enrolled_students_for_class(session_data['class_id'])
+        total_students = len(enrolled_students)
+        
+        # Calculate statistics
+        present_count = len([r for r in records if r['status'] == 'present'])
+        late_count = len([r for r in records if r['status'] == 'late'])
+        absent_count = total_students - len(records)
+        attendance_rate = len(records) / total_students if total_students > 0 else 0
+        
+        # Face recognition stats
+        face_verified_count = len([r for r in records if r['face_match_score'] and r['face_match_score'] > FACE_THRESHOLD])
+        avg_confidence = np.mean([r['face_match_score'] for r in records if r['face_match_score']]) if records else 0
+        
+        # Capture statistics
+        total_captures = len(captures)
+        total_faces_detected = sum([c['faces_detected'] or 0 for c in captures])
+        total_faces_recognized = sum([c['faces_recognized'] or 0 for c in captures])
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "session_info": session_data,
+            "statistics": {
+                "total_students": total_students,
+                "present_count": present_count,
+                "late_count": late_count,
+                "absent_count": absent_count,
+                "attendance_rate": round(attendance_rate, 3),
+                "face_verification_rate": round(face_verified_count / len(records), 3) if records else 0,
+                "average_confidence": round(float(avg_confidence), 3)
+            },
+            "capture_statistics": {
+                "total_captures": total_captures,
+                "total_faces_detected": total_faces_detected,
+                "total_faces_recognized": total_faces_recognized,
+                "detection_rate": round(total_faces_recognized / total_faces_detected, 3) if total_faces_detected > 0 else 0
+            },
+            "attendance_records": records,
+            "capture_logs": captures
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting session statistics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+
+@app.get("/api/session/{session_id}/verify-enrollment/{student_id}")
+async def verify_student_enrollment(session_id: str, student_id: str):
+    """Verify if student has face enrollment for attendance"""
+    try:
+        # Check if student has active face embedding
+        embedding_result = supabase.table('student_face_embeddings').select('face_quality, created_at').eq('student_id', student_id).eq('is_active', True).single().execute()
+        
+        has_face_data = bool(embedding_result.data)
+        
+        return {
+            "success": True,
+            "student_id": student_id,
+            "has_face_data": has_face_data,
+            "face_quality": embedding_result.data.get('face_quality', 0) if has_face_data else 0,
+            "enrolled_date": embedding_result.data.get('created_at') if has_face_data else None
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error verifying enrollment for {student_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to verify enrollment: {str(e)}")
