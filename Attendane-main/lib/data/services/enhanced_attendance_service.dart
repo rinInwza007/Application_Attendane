@@ -149,33 +149,24 @@ class EnhancedAttendanceService {
     };
   }
 
-  Future<Map<String, dynamic>> verifyFaceEnrollment(String studentId) async {
+   Future<Map<String, dynamic>> verifyFaceEnrollment(String studentId) async {
     try {
-      final response = await _client.get(
-        Uri.parse('$BASE_URL/api/face/verify/$studentId'),
-        headers: _headers,
-      ).timeout(const Duration(seconds: 10));
+      final response = await http.get(
+        Uri.parse('$BASE_URL/api/session/temp/verify-enrollment/$studentId'),
+      );
       
       if (response.statusCode == 200) {
-        final result = json.decode(response.body);
-        return {
-          'success': true,
-          'has_face_data': result['has_face_data'] ?? false,
-          'student_id': result['student_id'],
-          'quality_score': result['quality_score'],
-        };
+        return json.decode(response.body);
       } else {
-        throw Exception('Failed to verify face enrollment');
+        return {'success': false, 'has_face_data': false};
       }
       
     } catch (e) {
       print('❌ Error verifying face enrollment: $e');
-      return {
-        'success': false,
-        'error': e.toString(),
-      };
+      return {'success': false, 'has_face_data': false};
     }
   }
+
 
   Future<Map<String, dynamic>> deleteFaceEnrollment(String studentId) async {
     try {
@@ -205,51 +196,72 @@ class EnhancedAttendanceService {
 
   // ==================== Enhanced Session Management ====================
   
-  Future<Map<String, dynamic>> createEnhancedSession({
+  Future<Map<String, dynamic>> startClassSession({
     required String classId,
     required String teacherEmail,
+    required String initialImagePath,
     int durationHours = 2,
     int captureIntervalMinutes = 5,
     int onTimeLimitMinutes = 30,
   }) async {
     try {
-      print('🔄 Creating enhanced session for class: $classId');
+      final request = http.MultipartRequest('POST', Uri.parse('$BASE_URL/api/class/start-session'));
       
-      final response = await _client.post(
-        Uri.parse('$BASE_URL/api/session/create'),
-        headers: _headers,
-        body: json.encode({
-          'class_id': classId,
-          'teacher_email': teacherEmail,
-          'duration_hours': durationHours,
-          'capture_interval_minutes': captureIntervalMinutes,
-          'on_time_limit_minutes': onTimeLimitMinutes,
-        }),
-      ).timeout(const Duration(seconds: 30));
+      // Add form fields
+      request.fields['class_id'] = classId;
+      request.fields['teacher_email'] = teacherEmail;
+      request.fields['duration_hours'] = durationHours.toString();
+      request.fields['capture_interval_minutes'] = captureIntervalMinutes.toString();
+      request.fields['on_time_limit_minutes'] = onTimeLimitMinutes.toString();
+      
+      // Add initial image
+      final file = await http.MultipartFile.fromPath('initial_image', initialImagePath);
+      request.files.add(file);
+      
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
       
       if (response.statusCode == 200) {
-        final result = json.decode(response.body);
-        print('✅ Enhanced session created: ${result['session_id']}');
-        
-        return {
-          'success': true,
-          'session_id': result['session_id'],
-          'start_time': result['start_time'],
-          'end_time': result['end_time'],
-          'capture_interval_minutes': result['capture_interval_minutes'],
-          'on_time_limit_minutes': result['on_time_limit_minutes'],
-        };
+        final result = json.decode(responseBody);
+        print('✅ Class session started successfully');
+        return result;
       } else {
-        final error = json.decode(response.body);
-        throw Exception(error['detail'] ?? 'Failed to create session');
+        final error = json.decode(responseBody);
+        throw Exception(error['detail'] ?? 'Failed to start class session');
       }
       
     } catch (e) {
-      print('❌ Session creation error: $e');
-      return {
-        'success': false,
-        'error': e.toString(),
-      };
+      print('❌ Error starting class session: $e');
+      throw Exception('Failed to start class session: $e');
+    }
+  }
+  Future<Map<String, dynamic>> captureManualAttendance({
+    required String sessionId,
+    required String imagePath,
+  }) async {
+    try {
+      final request = http.MultipartRequest('POST', Uri.parse('$BASE_URL/api/class/manual-capture'));
+      
+      request.fields['session_id'] = sessionId;
+      
+      final file = await http.MultipartFile.fromPath('image', imagePath);
+      request.files.add(file);
+      
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      
+      if (response.statusCode == 200) {
+        final result = json.decode(responseBody);
+        print('✅ Manual capture processed successfully');
+        return result;
+      } else {
+        final error = json.decode(responseBody);
+        throw Exception(error['detail'] ?? 'Manual capture failed');
+      }
+      
+    } catch (e) {
+      print('❌ Error in manual capture: $e');
+      throw Exception('Manual capture failed: $e');
     }
   }
 
@@ -432,28 +444,20 @@ class EnhancedAttendanceService {
   
   Future<Map<String, dynamic>> getSessionStatistics(String sessionId) async {
     try {
-      final response = await _client.get(
+      final response = await http.get(
         Uri.parse('$BASE_URL/api/session/$sessionId/statistics'),
-        headers: _headers,
-      ).timeout(const Duration(seconds: 30));
+      );
       
       if (response.statusCode == 200) {
-        final result = json.decode(response.body);
-        return {
-          'success': true,
-          'session_id': sessionId,
-          'statistics': result['statistics'],
-          'student_details': result['student_details'],
-          'hourly_breakdown': result['hourly_breakdown'],
-        };
+        return json.decode(response.body);
       } else {
-        // Fallback to basic statistics
-        return await _calculateBasicStatistics(sessionId);
+        final error = json.decode(response.body);
+        throw Exception(error['detail'] ?? 'Failed to get statistics');
       }
       
     } catch (e) {
       print('❌ Error getting session statistics: $e');
-      return await _calculateBasicStatistics(sessionId);
+      throw Exception('Failed to get session statistics: $e');
     }
   }
 
