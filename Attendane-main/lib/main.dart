@@ -52,7 +52,6 @@ Future<void> _initializeSupabase() async {
     print('✅ Supabase initialized successfully');
   } catch (e) {
     print('❌ Failed to initialize Supabase: $e');
-    // In production, you might want to show an error screen
     rethrow;
   }
 }
