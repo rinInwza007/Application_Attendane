@@ -4,6 +4,8 @@ import 'package:myproject2/presentation/screens/class/class_detail.dart';
 import 'package:myproject2/presentation/screens/class/classedit.dart';
 import 'package:myproject2/presentation/screens/class/createclass.dart';
 import 'package:myproject2/presentation/screens/settings/setting.dart';
+import 'package:myproject2/presentation/screens/attendance/enhanced_teacher_attendance_screen.dart';
+import 'package:myproject2/presentation/screens/attendance/simple_teacher_attendance_screen.dart';
 
 class TeacherProfile extends StatefulWidget {
   const TeacherProfile({super.key});
@@ -207,95 +209,154 @@ class _TeacherProfileState extends State<TeacherProfile> {
   //แก้ไข Widget _buildClassCard ใน profileteachaer.dart
 
   Widget _buildClassCard(Map<String, dynamic> classData) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 16),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: InkWell(
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => ClassDetailPage(
-                classId: classData['class_id'],
+  return Card(
+    margin: const EdgeInsets.only(bottom: 16),
+    elevation: 2,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    child: InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ClassDetailPage(
+              classId: classData['class_id'],
+            ),
+          ),
+        ).then((_) => _loadClasses());
+      },
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.purple.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    classData['class_id'] ?? '',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.purple.shade700,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                PopupMenuButton<String>(
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: 'edit',
+                      child: Text('Edit Class'),
+                    ),
+                  ],
+                  onSelected: (value) {
+                    if (value == 'edit') {
+                      showDialog(
+                        context: context,
+                        builder: (context) => EditClassDialog(
+                          classData: classData,
+                          onClassUpdated: () {
+                            _loadClasses();
+                          },
+                        ),
+                      );
+                    }
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              classData['class_name'] ?? '',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
               ),
             ),
-          ).then((_) => _loadClasses());
-        },
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.purple.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      classData['class_id'] ?? '',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.purple.shade700,
-                      ),
-                    ),
-                  ),
-                  const Spacer(),
-                  // แก้ไขส่วน PopupMenuButton ใน _buildClassCard ใน profileteachaer.dart
-
-                  PopupMenuButton<String>(
-                    itemBuilder: (context) => [
-                      const PopupMenuItem(
-                        value: 'edit',
-                        child: Text('Edit Class'),
-                      ),
-                    ],
-                    onSelected: (value) {
-                      if (value == 'edit') {
-                        showDialog(
-                          context: context,
-                          builder: (context) => EditClassDialog(
-                            classData: classData,
-                            onClassUpdated: () {
-                              _loadClasses(); // Refresh class list after update
-                            },
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _buildInfoChip(
+                    Icons.access_time, classData['schedule'] ?? ''),
+                const SizedBox(width: 8),
+                _buildInfoChip(Icons.room, classData['room'] ?? ''),
+              ],
+            ),
+            
+            // 🎯 เพิ่มปุ่ม Attendance ตรงนี้!
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                // ปุ่ม Enhanced Attendance (ใหม่)
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => EnhancedTeacherAttendanceScreen(
+                            classId: classData['class_id'],
+                            className: classData['class_name'],
                           ),
-                        );
-                      }
+                        ),
+                      );
                     },
+                    icon: const Icon(Icons.face_retouching_natural, size: 18),
+                    label: const Text(
+                      'Enhanced Attendance',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green.shade400,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(
-                classData['class_name'] ?? '',
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
                 ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  _buildInfoChip(
-                      Icons.access_time, classData['schedule'] ?? ''),
-                  const SizedBox(width: 8),
-                  _buildInfoChip(Icons.room, classData['room'] ?? ''),
-                ],
-              ),
-            ],
-          ),
+                const SizedBox(width: 12),
+                
+                // ปุ่ม Simple Attendance (เดิม)
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => SimpleTeacherAttendanceScreen(
+                            classId: classData['class_id'],
+                            className: classData['class_name'],
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.how_to_reg, size: 18),
+                    label: const Text(
+                      'Simple Attendance',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue.shade600,
+                      side: BorderSide(color: Colors.blue.shade300),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _buildInfoChip(IconData icon, String label) {
     return Container(

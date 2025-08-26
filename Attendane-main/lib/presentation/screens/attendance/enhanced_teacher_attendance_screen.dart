@@ -79,9 +79,13 @@ void initState() {
   }
 
   void _setupCameraCallbacks() {
+  // Callback เมื่อถ่ายรูปสำเร็จ
   _cameraService.onImageCaptured = (imagePath, captureTime) {
-    print('📸 Auto-captured: ${imagePath.split('/').last}');
-    setState(() => _totalSnapshots++);
+    print('📸 Snapshot captured: ${imagePath.split('/').last} at $captureTime');
+    setState(() {
+      _totalSnapshots++;
+    });
+    _showSnackBar('📸 Snapshot captured - processing...', Colors.blue);
   };
 
   _cameraService.onAttendanceProcessed = (result) {
@@ -100,46 +104,46 @@ void initState() {
 
     // Callback เมื่อประมวลผล attendance สำเร็จ
     _cameraService.onAttendanceProcessed = (result) {
-      print('✅ Attendance processed: $result');
-      final facesDetected = result['faces_detected'] as int? ?? 0;
-      final newRecords = result['new_attendance_records'] as int? ?? 0;
-      
-      setState(() {
-        _successfulCaptures++;
-        _facesDetected += facesDetected;
-      });
-      
-      if (facesDetected > 0) {
-        _showSnackBar('✅ Detected $facesDetected face(s), $newRecords new records', Colors.green);
-        _loadAttendanceRecords(); // Refresh records
-      } else {
-        _showSnackBar('📷 No faces detected in snapshot', Colors.orange);
-      }
-    };
+    print('✅ Attendance processed: $result');
+    final facesDetected = result['faces_detected'] as int? ?? 0;
+    final newRecords = result['new_attendance_records'] as int? ?? 0;
+    
+    setState(() {
+      _successfulCaptures++;
+      _facesDetected += facesDetected;
+    });
+    
+    if (facesDetected > 0) {
+      _showSnackBar('✅ Detected $facesDetected face(s), $newRecords new records', Colors.green);
+      _loadAttendanceRecords(); // Refresh records
+    } else {
+      _showSnackBar('📷 No faces detected in snapshot', Colors.orange);
+    }
+  };
 
     // Callback เมื่อเกิดข้อผิดพลาด
     _cameraService.onError = (error) {
-      print('❌ Camera error: $error');
-      _addError('Camera: $error');
-      _showSnackBar('❌ Camera error: $error', Colors.red);
-    };
+    print('❌ Camera error: $error');
+    _addError('Camera: $error');
+    _showSnackBar('❌ Camera error: $error', Colors.red);
+  };
 
     // Callback เมื่อสถานะกล้องเปลี่ยน
     _cameraService.onStatusChanged = (status) {
-      print('📸 Camera status: $status');
-      setState(() {
-        _isCameraReady = status == CameraServiceStatus.ready || 
-                        status == CameraServiceStatus.capturing;
-      });
-    };
+    print('📸 Camera status: $status');
+    setState(() {
+      _isCameraReady = status == CameraServiceStatus.ready || 
+                      status == CameraServiceStatus.capturing;
+    });
+  };
 
     // Callback เมื่อสถิติอัปเดต
     _cameraService.onStatsUpdated = (stats) {
-      setState(() {
-        _cameraStats = stats;
-      });
-    };
-  }
+    setState(() {
+      _cameraStats = stats;
+    });
+  };
+}
 
   Future<void> _initializeServices() async {
     setState(() => _isLoading = true);
@@ -502,93 +506,93 @@ void initState() {
   // ========== Session Summary ==========
   
   void _showSessionSummaryDialog() {
-    final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
-    final totalStudents = stats['total_students'] ?? 0;
-    final presentCount = stats['present_count'] ?? 0;
-    final lateCount = stats['late_count'] ?? 0;
-    final attendanceRate = stats['attendance_rate'] ?? 0.0;
-    
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Row(
-    children: [
-    Icon(Icons.summarize, color: Colors.green),
-    SizedBox(width: 12),
-    Text('Class Session Summary'),
-  ],
-),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Class: ${widget.className}',
-                style: const TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-              SizedBox(height: 16),
-              
-              _buildSummaryRow('Total Students', '$totalStudents'),
-              _buildSummaryRow('Present', '$presentCount'),
-              _buildSummaryRow('Late', '$lateCount'),
-              _buildSummaryRow('Attendance Rate', '${(attendanceRate * 100).toStringAsFixed(1)}%'),
-              
-              const Divider(height: 24),
-              
-              _buildSummaryRow('Total Snapshots', '$_totalSnapshots'),
-              _buildSummaryRow('Successful Captures', '$_successfulCaptures'),
-              _buildSummaryRow('Faces Detected', '$_facesDetected'),
-              _buildSummaryRow('Face Detection Rate', 
-                _successfulCaptures > 0 
-                  ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
-                  : '0 faces/snapshot'),
-              
-              SizedBox(height: 16),
-              
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.green.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.green.shade200),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.check_circle, color: Colors.green),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Class session completed successfully!',
-                        style: TextStyle(
-                          color: Colors.green,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green,
-              foregroundColor: Colors.white,
-            ),
-            child:  Text('Close'),
-          ),
+  final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
+  final totalStudents = stats['total_students'] ?? 0;
+  final presentCount = stats['present_count'] ?? 0;
+  final lateCount = stats['late_count'] ?? 0;
+  final attendanceRate = stats['attendance_rate'] ?? 0.0;
+  
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.summarize, color: Colors.green),
+          SizedBox(width: 12),
+          Text('Class Session Summary'),
         ],
       ),
-    );
-  }
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Class: ${widget.className}',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            
+            _buildSummaryRow('Total Students', '$totalStudents'),
+            _buildSummaryRow('Present', '$presentCount'),
+            _buildSummaryRow('Late', '$lateCount'),
+            _buildSummaryRow('Attendance Rate', '${(attendanceRate * 100).toStringAsFixed(1)}%'),
+            
+            const Divider(height: 24),
+            
+            _buildSummaryRow('Total Snapshots', '$_totalSnapshots'),
+            _buildSummaryRow('Successful Captures', '$_successfulCaptures'),
+            _buildSummaryRow('Faces Detected', '$_facesDetected'),
+            _buildSummaryRow('Face Detection Rate', 
+              _successfulCaptures > 0 
+                ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
+                : '0 faces/snapshot'),
+            
+            const SizedBox(height: 16),
+            
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.green),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Class session completed successfully!',
+                      style: TextStyle(
+                        color: Colors.green,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        ElevatedButton(
+          onPressed: () => Navigator.of(context).pop(),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
 
   Widget _buildSummaryRow(String label, String value) {
     return Padding(
@@ -889,16 +893,16 @@ void initState() {
 
       Widget _buildSessionControl() {
   return Card(
-    margin:  EdgeInsets.symmetric(horizontal: 16),
+    margin: const EdgeInsets.symmetric(horizontal: 16),
     child: Padding(
-      padding:  EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
       child: Column(
         children: [
           Text(
             'Class Session Control',
             style: Theme.of(context).textTheme.titleLarge,
           ),
-          SizedBox(height: 16),
+          const SizedBox(height: 16),
           if (!_isSessionActive)
             SizedBox(
               width: double.infinity,
@@ -907,7 +911,7 @@ void initState() {
                     ? _startAttendanceSession
                     : null,
                 icon: const Icon(Icons.play_arrow),
-                label:  Text('🎯 Start Class & Begin Tracking'),
+                label: const Text('🎯 Start Class & Begin Tracking'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
                   foregroundColor: Colors.white,
@@ -922,19 +926,19 @@ void initState() {
                   child: ElevatedButton.icon(
                     onPressed: _isLoading ? null : _captureManualSnapshot,
                     icon: const Icon(Icons.camera_alt),
-                    label:  Text('📸 Manual Snapshot'),
+                    label: const Text('📸 Manual Snapshot'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.blue,
                       foregroundColor: Colors.white,
                     ),
                   ),
                 ),
-                SizedBox(width: 16),
+                const SizedBox(width: 16),
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: _isLoading ? null : _endAttendanceSession,
                     icon: const Icon(Icons.stop),
-                    label:  Text('🏁 End Class'),
+                    label: const Text('🏁 End Class'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.red,
                       foregroundColor: Colors.white,
@@ -1420,11 +1424,5 @@ void initState() {
       ),
     );
   }
-} const Text('📸 Manual Snapshot'),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _endAttendanceSession,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('🏁 End Class'),
+} 
                       
