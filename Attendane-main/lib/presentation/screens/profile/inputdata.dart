@@ -1,8 +1,8 @@
+// lib/presentation/screens/profile/inputdata.dart - Face Recognition เป็นบังคับสำหรับ Student
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/services/auth_service.dart';
-import 'package:myproject2/data/services/face_recognition_service.dart';
-import 'package:myproject2/presentation/common_widgets/image_picker_screen.dart';
+import 'package:myproject2/presentation/screens/face/realtime_face_detection_screen.dart';
 import 'package:myproject2/presentation/screens/profile/profileteachaer.dart';
 import 'package:myproject2/presentation/screens/profile/updated_profile.dart';
 
@@ -18,9 +18,10 @@ class _InputDataPageState extends State<InputDataPage> {
   final _authService = AuthService();
   final _fullNameController = TextEditingController();
   final _schoolIdController = TextEditingController();
+  
   bool _isLoading = false;
-  bool _isFaceProcessing = false;
   String _selectedRole = 'student';
+  String _currentStep = 'profile'; // 'profile', 'face_setup', 'completing'
 
   @override
   void dispose() {
@@ -49,278 +50,190 @@ class _InputDataPageState extends State<InputDataPage> {
     return null;
   }
 
-  Future<void> _saveUserProfile() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
+  Future<void> _saveProfileAndContinue() async {
+    if (!_formKey.currentState!.validate()) return;
 
-    if (!mounted) return;
     setState(() => _isLoading = true);
 
     try {
       print('🔄 Saving user profile...');
       
-      // บันทึกข้อมูลผู้ใช้ก่อน
+      // บันทึก profile
       await _authService.saveUserProfile(
         fullName: _fullNameController.text.trim(),
         schoolId: _schoolIdController.text.trim(),
         userType: _selectedRole,
       );
 
-      print('✅ User profile saved successfully');
+      print('✅ Profile saved successfully');
 
-      // ตรวจสอบว่าข้อมูลบันทึกสำเร็จ
-      final savedProfile = await _authService.getUserProfile();
-      if (savedProfile == null) {
-        throw Exception('Failed to save user profile');
+      if (_selectedRole == 'teacher') {
+        // Teacher ไม่ต้องตั้งค่า face → ไป home เลย
+        _completeSetup();
+      } else {
+        // Student ต้องตั้งค่า face (บังคับ)
+        setState(() => _currentStep = 'face_setup');
       }
 
-      print('📋 Saved profile: $savedProfile');
-
-      // ถ้าเป็นนักเรียน ต้องถ่ายรูปก่อน
-      if (_selectedRole == 'student') {
-        print('👨‍🎓 User is student, checking face data...');
-        
-        if (!mounted) return;
-        
-        await _handleStudentFaceCapture();
-      }
-
-      // เมื่อทุกอย่างเรียบร้อย นำทางไปยังหน้าที่เหมาะสม
-      if (mounted) {
-        _navigateToProfilePage();
-      }
     } catch (e) {
-      print('❌ Error in _saveUserProfile: $e');
-      if (mounted) {
-        _showErrorDialog(
-          'เกิดข้อผิดพลาดในการบันทึกข้อมูล: ${e.toString()}',
-          showRetry: true,
-          onRetry: _saveUserProfile,
-        );
-      }
+      print('❌ Error saving profile: $e');
+      _showErrorDialog('Cannot save profile: ${e.toString()}');
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _handleStudentFaceCapture() async {
-    if (!mounted) return;
-    
-    final hasFace = await _authService.hasFaceEmbedding();
-    if (hasFace) {
-      print('✅ Face data already exists');
-      return;
-    }
-
-    print('📸 No face data found, starting face capture...');
-    
-    bool faceProcessed = false;
-    int attempts = 0;
-    const maxAttempts = 3;
-
-    while (!faceProcessed && attempts < maxAttempts && mounted) {
-      attempts++;
-      print('🔄 Face capture attempt $attempts/$maxAttempts');
-      
-      try {
-        await _processFaceCapture();
-        
-        // ตรวจสอบอีกครั้งว่ามีข้อมูลใบหน้าแล้ว
-        faceProcessed = await _authService.hasFaceEmbedding();
-
-        if (!faceProcessed && mounted) {
-          final shouldRetry = await _showRetryDialog(
-            'ข้อมูลใบหน้าไม่สมบูรณ์',
-            'การบันทึกข้อมูลใบหน้าไม่สำเร็จ กรุณาลองใหม่อีกครั้ง',
-            attempts < maxAttempts,
-          );
-          
-          if (!shouldRetry) break;
-        }
-      } catch (e) {
-        print('❌ Error in face capture attempt $attempts: $e');
-        if (mounted) {
-          final shouldRetry = await _showRetryDialog(
-            'เกิดข้อผิดพลาด',
-            e.toString(),
-            attempts < maxAttempts,
-          );
-          
-          if (!shouldRetry) break;
-        }
-      }
-    }
-
-    // ตรวจสอบสุดท้าย
-    final finalCheck = await _authService.hasFaceEmbedding();
-    if (!finalCheck && mounted) {
-      _showErrorDialog(
-        'ไม่สามารถบันทึกข้อมูลใบหน้าได้หลังจากพยายาม $attempts ครั้ง\nกรุณาติดต่อผู้ดูแลระบบ',
-        showRetry: false,
-      );
-      throw Exception('Failed to save face data after $attempts attempts');
-    }
-  }
-
-  Future<void> _processFaceCapture() async {
-    if (!mounted) return;
-    
-    setState(() => _isFaceProcessing = true);
+  Future<void> _setupFaceRecognition() async {
+    setState(() => _isLoading = true);
     
     try {
-      print('📱 Opening image picker...');
+      print('📱 Opening mandatory face recognition setup...');
       
-      final String? imagePath = await Navigator.push<String>(
+      final result = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
-          builder: (context) => ImagePickerScreen(
-            instructionText: "กรุณาเลือกรูปภาพที่เห็นใบหน้าชัดเจน และต้องมีเพียงใบหน้าของคุณเท่านั้น",
+          builder: (context) => RealtimeFaceDetectionScreen(
+            isRegistration: true,
+            instructionText: "วางใบหน้าของคุณในกรอบสีเขียว\nเพื่อตั้งค่า Face Recognition (จำเป็นสำหรับนักเรียน)",
+            onFaceEmbeddingCaptured: (embedding) {
+              print('✅ Face embedding captured successfully');
+            },
           ),
         ),
       );
 
-      if (!mounted) return;
-
-      if (imagePath == null) {
-        throw Exception('ไม่ได้เลือกรูปภาพ');
-      }
-
-      print('📷 Image selected: $imagePath');
-
-      // ตรวจสอบไฟล์ก่อนประมวลผล
-      final file = File(imagePath);
-      if (!await file.exists()) {
-        throw Exception('ไม่พบไฟล์รูปภาพที่เลือก');
-      }
-
-      final fileStat = await file.stat();
-      if (fileStat.size == 0) {
-        throw Exception('ไฟล์รูปภาพเสียหายหรือว่างเปล่า');
-      }
-
-      print('🔍 File validation passed, size: ${fileStat.size} bytes');
-
-      // ประมวลผลใบหน้า
-      final faceService = FaceRecognitionService();
-      
-      try {
-        print('🤖 Initializing face recognition service...');
-        await faceService.initialize();
-        
-        print('🧠 Processing face embedding...');
-        final embedding = await faceService.getFaceEmbedding(imagePath);
-        
-        print('💾 Saving face embedding to database...');
-        await _authService.saveFaceEmbedding(embedding);
-        
-        print('✅ Face embedding saved successfully');
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('บันทึกข้อมูลใบหน้าสำเร็จ'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-      } finally {
-        await faceService.dispose();
-        print('🧹 Face recognition service disposed');
-      }
-
-      // ลบไฟล์ชั่วคราว
-      try {
-        if (await file.exists()) {
-          await file.delete();
-          print('🗑️ Temporary image file deleted');
-        }
-      } catch (e) {
-        print('⚠️ Failed to delete temporary file: $e');
+      if (result == true) {
+        // ตั้งค่าสำเร็จ → ไปหน้าสำเร็จ
+        _completeSetup();
+      } else {
+        // ไม่สำเร็จ → แสดง dialog ที่ให้ลองใหม่เท่านั้น (ไม่มี option ข้าม)
+        _showFaceSetupFailedDialog();
       }
 
     } catch (e) {
-      print('❌ Error in _processFaceCapture: $e');
-      
-      String errorMessage = 'เกิดข้อผิดพลาด: ${e.toString()}';
-      
-      if (e.toString().contains('ไม่พบใบหน้า')) {
-        errorMessage = 'ไม่พบใบหน้าในรูปภาพ กรุณาเลือกรูปที่เห็นใบหน้าชัดเจน';
-      } else if (e.toString().contains('พบใบหน้าหลาย')) {
-        errorMessage = 'พบใบหน้าหลายใบในรูปภาพ กรุณาเลือกรูปที่มีเพียงใบหน้าของคุณเท่านั้น';
-      } else if (e.toString().contains('ไม่ได้เลือกรูปภาพ')) {
-        errorMessage = 'กรุณาเลือกรูปภาพใบหน้าเพื่อดำเนินการต่อ';
-      }
-      
-      throw Exception(errorMessage);
+      print('❌ Error in face setup: $e');
+      _showErrorDialog('Face setup failed: ${e.toString()}');
     } finally {
-      if (mounted) {
-        setState(() => _isFaceProcessing = false);
-      }
+      setState(() => _isLoading = false);
     }
   }
 
-  Future<bool> _showRetryDialog(String title, String message, bool canRetry) async {
-    if (!mounted) return false;
-    
-    return await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          if (canRetry)
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('ลองใหม่'),
-            ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(canRetry ? 'ข้าม' : 'ปิด'),
-          ),
-        ],
-      ),
-    ) ?? false;
-  }
-
-  void _showErrorDialog(String message, {bool showRetry = false, VoidCallback? onRetry}) {
-    if (!mounted) return;
-    
+  void _showFaceSetupFailedDialog() {
     showDialog(
       context: context,
+      barrierDismissible: false, // ไม่ให้ปิด dialog ได้
       builder: (context) => AlertDialog(
-        title: const Text('เกิดข้อผิดพลาด'),
-        content: Text(message),
-        actions: [
-          if (showRetry && onRetry != null)
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                onRetry();
-              },
-              child: const Text('ลองใหม่'),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber, color: Colors.orange),
+            SizedBox(width: 12),
+            Text('Face Setup Required'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Face Recognition setup is required for all students.',
+              style: TextStyle(fontWeight: FontWeight.w600),
             ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('ปิด'),
+            SizedBox(height: 12),
+            Text(
+              'This ensures:',
+              style: TextStyle(fontWeight: FontWeight.w500),
+            ),
+            SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.security, size: 16, color: Colors.blue),
+                SizedBox(width: 8),
+                Expanded(child: Text('Secure attendance verification')),
+              ],
+            ),
+            SizedBox(height: 4),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.verified_user, size: 16, color: Colors.blue),
+                SizedBox(width: 8),
+                Expanded(child: Text('Prevention of attendance fraud')),
+              ],
+            ),
+            SizedBox(height: 4),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.speed, size: 16, color: Colors.blue),
+                SizedBox(width: 8),
+                Expanded(child: Text('Quick and easy check-in')),
+              ],
+            ),
+            SizedBox(height: 16),
+            Text(
+              'Please try the face setup again.',
+              style: TextStyle(
+                color: Colors.orange,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _setupFaceRecognition();
+            },
+            icon: const Icon(Icons.face),
+            label: const Text('Try Again'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue.shade400,
+              foregroundColor: Colors.white,
+            ),
           ),
         ],
       ),
     );
   }
 
-  void _navigateToProfilePage() {
-    if (!mounted) return;
+  void _completeSetup() {
+    setState(() => _currentStep = 'completing');
     
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (context) => _selectedRole == 'teacher'
-            ? const TeacherProfile()
-            : const UpdatedProfile(),
+    // รอ 1.5 วินาที แล้วไปหน้าหลัก
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (context) => _selectedRole == 'teacher'
+                ? const TeacherProfile()
+                : const UpdatedProfile(),
+          ),
+          (route) => false,
+        );
+      }
+    });
+  }
+
+  void _showErrorDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.error_outline, color: Colors.red),
+            SizedBox(width: 12),
+            Text('Error'),
+          ],
+        ),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
       ),
     );
   }
@@ -328,192 +241,602 @@ class _InputDataPageState extends State<InputDataPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text(
-          'User Information',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        title: Text(
+          _getAppBarTitle(),
+          style: const TextStyle(fontWeight: FontWeight.bold),
         ),
         centerTitle: true,
+        backgroundColor: Colors.white,
+        elevation: 0,
+        automaticallyImplyLeading: false,
       ),
       body: SafeArea(
         child: SingleChildScrollView(
           child: Padding(
             padding: const EdgeInsets.all(24.0),
-            child: Form(
-              key: _formKey,
-              child: Column(
-                children: [
-                  const SizedBox(height: 20),
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.purple.shade50,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      _selectedRole == 'teacher'
-                          ? Icons.school
-                          : Icons.person_outline,
-                      size: 100,
-                      color: Colors.purple.shade400,
-                    ),
-                  ),
-                  const SizedBox(height: 40),
-                  Text(
-                    'Welcome!',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.purple.shade700,
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Please complete your profile',
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: Colors.grey.shade600,
-                        ),
-                  ),
-                  const SizedBox(height: 32),
+            child: _buildCurrentStepContent(),
+          ),
+        ),
+      ),
+    );
+  }
 
-                  // Role Selection
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.grey.shade300),
+  String _getAppBarTitle() {
+    switch (_currentStep) {
+      case 'profile':
+        return 'Complete Your Profile';
+      case 'face_setup':
+        return 'Setup Face Recognition';
+      case 'completing':
+        return 'Almost Ready!';
+      default:
+        return 'Setup Account';
+    }
+  }
+
+  Widget _buildCurrentStepContent() {
+    switch (_currentStep) {
+      case 'profile':
+        return _buildProfileStep();
+      case 'face_setup':
+        return _buildFaceSetupStep();
+      case 'completing':
+        return _buildCompletingStep();
+      default:
+        return _buildProfileStep();
+    }
+  }
+
+  Widget _buildProfileStep() {
+    return Column(
+      children: [
+        const SizedBox(height: 20),
+        _buildStepIndicator(1, _selectedRole == 'student' ? 3 : 2),
+        const SizedBox(height: 40),
+        
+        // Welcome Icon
+        Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: Colors.purple.shade50,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            _selectedRole == 'teacher' ? Icons.school : Icons.person_outline,
+            size: 80,
+            color: Colors.purple.shade400,
+          ),
+        ),
+        const SizedBox(height: 30),
+        
+        Text(
+          'Welcome to Attendance Plus!',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Colors.purple.shade700,
+              ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Let\'s set up your account',
+          style: TextStyle(
+            fontSize: 16,
+            color: Colors.grey.shade600,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 40),
+
+        // Form
+        Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              // Role Selection
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'I am a...',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey.shade700,
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    const SizedBox(height: 16),
+                    Row(
                       children: [
-                        Text(
-                          'Select your role',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey.shade700,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            _buildRoleOption(
-                                'student', 'Student', Icons.person),
-                            const SizedBox(width: 12),
-                            _buildRoleOption(
-                                'teacher', 'Teacher', Icons.school),
-                          ],
-                        ),
+                        _buildRoleOption('student', 'Student', Icons.person),
+                        const SizedBox(width: 16),
+                        _buildRoleOption('teacher', 'Teacher', Icons.school),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  TextFormField(
-                    controller: _fullNameController,
-                    decoration: InputDecoration(
-                      labelText: 'Full Name',
-                      hintText: 'Enter your full name',
-                      prefixIcon: const Icon(Icons.person),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      filled: true,
-                      fillColor: Colors.grey.shade50,
-                    ),
-                    validator: _validateFullName,
-                    textCapitalization: TextCapitalization.words,
-                    enabled: !_isLoading && !_isFaceProcessing,
-                  ),
-                  const SizedBox(height: 20),
-                  TextFormField(
-                    controller: _schoolIdController,
-                    decoration: InputDecoration(
-                      labelText: 'School ID',
-                      hintText: 'Enter your school ID',
-                      prefixIcon: const Icon(Icons.numbers),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      filled: true,
-                      fillColor: Colors.grey.shade50,
-                    ),
-                    validator: _validateSchoolId,
-                    enabled: !_isLoading && !_isFaceProcessing,
-                  ),
-                  const SizedBox(height: 40),
-
-                  // Loading indicator for face processing
-                  if (_isFaceProcessing)
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      margin: const EdgeInsets.only(bottom: 20),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.shade50,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.blue.shade200),
-                      ),
-                      child: Row(
-                        children: [
-                          const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              'กำลังประมวลผลข้อมูลใบหน้า...',
-                              style: TextStyle(
-                                color: Colors.blue.shade700,
-                                fontWeight: FontWeight.w500,
+                    
+                    // แสดงข้อความเตือนสำหรับ student
+                    if (_selectedRole == 'student') ...[
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.blue.shade200),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.info_outline, color: Colors.blue.shade600, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Face Recognition setup is required for all students',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.blue.shade700,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: (_isLoading || _isFaceProcessing) ? null : _saveUserProfile,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.purple.shade400,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          ],
                         ),
-                        elevation: 2,
                       ),
-                      child: _isLoading
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(Colors.white),
-                              ),
-                            )
-                          : Text(
-                              _selectedRole == 'student' 
-                                  ? 'Save Profile & Setup Face ID'
-                                  : 'Save Profile',
-                              style: const TextStyle(
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // Full Name
+              TextFormField(
+                controller: _fullNameController,
+                decoration: InputDecoration(
+                  labelText: 'Full Name',
+                  hintText: 'Enter your full name',
+                  prefixIcon: const Icon(Icons.person),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                ),
+                validator: _validateFullName,
+                textCapitalization: TextCapitalization.words,
+                enabled: !_isLoading,
+              ),
+              const SizedBox(height: 20),
+
+              // School ID
+              TextFormField(
+                controller: _schoolIdController,
+                decoration: InputDecoration(
+                  labelText: 'School ID',
+                  hintText: 'Enter your school ID',
+                  prefixIcon: const Icon(Icons.numbers),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                ),
+                validator: _validateSchoolId,
+                enabled: !_isLoading,
+              ),
+              const SizedBox(height: 40),
+
+              // Continue Button
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  onPressed: _isLoading ? null : _saveProfileAndContinue,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.purple.shade400,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 2,
+                  ),
+                  child: _isLoading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Text(
+                              'Continue',
+                              style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
+                            if (_selectedRole == 'student') ...[
+                              const SizedBox(width: 8),
+                              const Icon(Icons.face, size: 18),
+                            ] else ...[
+                              const SizedBox(width: 8),
+                              const Icon(Icons.arrow_forward, size: 18),
+                            ],
+                          ],
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFaceSetupStep() {
+    return Column(
+      children: [
+        const SizedBox(height: 20),
+        _buildStepIndicator(2, 3),
+        const SizedBox(height: 40),
+        
+        // Face Icon with Animation
+        TweenAnimationBuilder(
+          tween: Tween<double>(begin: 0.8, end: 1.0),
+          duration: const Duration(milliseconds: 600),
+          builder: (context, double value, child) {
+            return Transform.scale(
+              scale: value,
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.blue.shade200,
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.face_retouching_natural,
+                  size: 80,
+                  color: Colors.blue.shade400,
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 30),
+        
+        Text(
+          'Face Recognition Required',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Colors.blue.shade700,
+              ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'This step is mandatory for all students\nto ensure secure attendance',
+          style: TextStyle(
+            fontSize: 16,
+            color: Colors.grey.shade600,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 40),
+        
+        // Required Notice
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.red.shade50,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.red.shade200),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.security, color: Colors.red.shade600, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Security Requirement',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.red.shade700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Face Recognition is mandatory for students to prevent attendance fraud and ensure system security.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.red.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        
+        // Benefits Card
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.blue.shade200),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.verified_user, color: Colors.blue.shade600, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Why Face Recognition?',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue.shade700,
                     ),
                   ),
                 ],
               ),
+              const SizedBox(height: 16),
+              ...[
+                'Secure identity verification',
+                'Instant attendance check-in',
+                'Anti-spoofing protection',
+                'Automated attendance tracking',
+              ].map((benefit) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.check_circle, size: 18, color: Colors.green.shade600),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        benefit,
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                  ],
+                ),
+              )),
+            ],
+          ),
+        ),
+        const SizedBox(height: 40),
+
+        // Setup Button (Required)
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: ElevatedButton.icon(
+            onPressed: _isLoading ? null : _setupFaceRecognition,
+            icon: _isLoading 
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  )
+                : const Icon(Icons.face),
+            label: Text(
+              _isLoading ? 'Setting up...' : 'Setup Face Recognition',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue.shade400,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              elevation: 2,
             ),
           ),
         ),
-      ),
+        const SizedBox(height: 16),
+        
+        // Note: No skip option
+        Text(
+          'This step is required to continue',
+          style: TextStyle(
+            color: Colors.grey.shade600,
+            fontSize: 14,
+            fontStyle: FontStyle.italic,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCompletingStep() {
+    return Column(
+      children: [
+        const SizedBox(height: 40),
+        _buildStepIndicator(_selectedRole == 'student' ? 3 : 2, 
+                           _selectedRole == 'student' ? 3 : 2),
+        const SizedBox(height: 60),
+        
+        // Success Animation
+        TweenAnimationBuilder(
+          tween: Tween<double>(begin: 0.0, end: 1.0),
+          duration: const Duration(milliseconds: 800),
+          builder: (context, double value, child) {
+            return Transform.scale(
+              scale: value,
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.green.shade200,
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.check_circle,
+                  size: 80,
+                  color: Colors.green.shade400,
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 30),
+        
+        Text(
+          'All Set! 🎉',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Colors.green.shade700,
+              ),
+        ),
+        const SizedBox(height: 8),
+        
+        Text(
+          _selectedRole == 'student' 
+              ? 'Your account and Face Recognition\nare ready to use!'
+              : 'Your teacher account is ready to use!',
+          style: TextStyle(
+            fontSize: 16,
+            color: Colors.grey.shade600,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 16),
+        
+        if (_selectedRole == 'student')
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.green.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.green.shade200),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.verified_user, color: Colors.green.shade600),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Face Recognition setup complete!\nYou can now use quick check-in.',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.green.shade700,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 40),
+        
+        // Loading indicator
+        SizedBox(
+          width: 40,
+          height: 40,
+          child: CircularProgressIndicator(
+            strokeWidth: 3,
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.green.shade400),
+          ),
+        ),
+        const SizedBox(height: 16),
+        
+        Text(
+          'Taking you to the app...',
+          style: TextStyle(
+            color: Colors.grey.shade600,
+            fontSize: 14,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStepIndicator(int currentStep, int totalSteps) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(totalSteps, (index) {
+        final stepNumber = index + 1;
+        final isCompleted = stepNumber < currentStep;
+        final isCurrent = stepNumber == currentStep;
+        
+        return Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: isCompleted 
+                    ? Colors.green.shade400 
+                    : isCurrent 
+                        ? Colors.purple.shade400 
+                        : Colors.grey.shade300,
+                shape: BoxShape.circle,
+                border: isCurrent 
+                    ? Border.all(color: Colors.purple.shade600, width: 2)
+                    : null,
+              ),
+              child: Center(
+                child: isCompleted
+                    ? const Icon(Icons.check, color: Colors.white, size: 18)
+                    : Text(
+                        stepNumber.toString(),
+                        style: TextStyle(
+                          color: isCurrent ? Colors.white : Colors.grey.shade600,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+              ),
+            ),
+            if (index < totalSteps - 1)
+              Container(
+                width: 50,
+                height: 3,
+                color: isCompleted 
+                    ? Colors.green.shade400 
+                    : Colors.grey.shade300,
+                margin: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+          ],
+        );
+      }),
     );
   }
 
@@ -521,9 +844,10 @@ class _InputDataPageState extends State<InputDataPage> {
     final isSelected = _selectedRole == role;
     return Expanded(
       child: InkWell(
-        onTap: (_isLoading || _isFaceProcessing) ? null : () => setState(() => _selectedRole = role),
+        onTap: _isLoading ? null : () => setState(() => _selectedRole = role),
+        borderRadius: BorderRadius.circular(12),
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: 20),
           decoration: BoxDecoration(
             color: isSelected ? Colors.purple.shade50 : Colors.white,
             borderRadius: BorderRadius.circular(12),
@@ -536,20 +860,29 @@ class _InputDataPageState extends State<InputDataPage> {
             children: [
               Icon(
                 icon,
-                color:
-                    isSelected ? Colors.purple.shade400 : Colors.grey.shade600,
+                color: isSelected ? Colors.purple.shade400 : Colors.grey.shade600,
                 size: 32,
               ),
               const SizedBox(height: 8),
               Text(
                 label,
                 style: TextStyle(
-                  color: isSelected
-                      ? Colors.purple.shade700
-                      : Colors.grey.shade700,
+                  color: isSelected ? Colors.purple.shade700 : Colors.grey.shade700,
                   fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  fontSize: 14,
                 ),
               ),
+              if (role == 'student')
+                const SizedBox(height: 4),
+              if (role == 'student')
+                Text(
+                  '(Face ID Required)',
+                  style: TextStyle(
+                    color: isSelected ? Colors.blue.shade600 : Colors.grey.shade500,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
             ],
           ),
         ),

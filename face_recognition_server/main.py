@@ -105,7 +105,7 @@ def get_face_embedding_cached(student_id: str) -> Optional[np.ndarray]:
             return embedding
     except Exception as e:
         logger.error(f"Error getting face embedding for {student_id}: {e}")
-    
+
     return None
 
 def process_multiple_faces(image_array: np.ndarray, enrolled_students: List[str]) -> List[Dict]:
