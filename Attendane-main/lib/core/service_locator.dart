@@ -7,6 +7,7 @@ import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/data/services/unified_attendance_service.dart';
 import 'package:myproject2/data/services/unified_camera_service.dart';
 import 'package:myproject2/data/services/unified_face_service.dart';
+import 'package:myproject2/core/service_manager.dart'; // เพิ่ม import
 import 'package:myproject2/core/constants/app_constants.dart';
 
 final GetIt serviceLocator = GetIt.instance;
@@ -492,27 +493,27 @@ class AnalyticsService {
   
   // Enhanced: Attendance-specific analytics
   void trackSessionCreated(String classId, int duration) {
-    trackEvent('session_created', {
-      'class_id': classId,
-      'duration_hours': duration,
-    });
+    trackEvent('session_created', parameters: {
+  'class_id': classId,
+  'duration_hours': duration,
+});
   }
   
   void trackCheckIn(String method, bool success) {
-    trackEvent('check_in_attempt', {
+    trackEvent('check_in_attempt',parameters: {
       'method': method, // 'simple' or 'face'
       'success': success,
     });
   }
   
   void trackFaceEnrollment(bool success) {
-    trackEvent('face_enrollment', {
+    trackEvent('face_enrollment', parameters:{
       'success': success,
     });
   }
   
   void trackPeriodicCapture(int facesDetected) {
-    trackEvent('periodic_capture', {
+    trackEvent('periodic_capture', parameters:{
       'faces_detected': facesDetected,
     });
   }

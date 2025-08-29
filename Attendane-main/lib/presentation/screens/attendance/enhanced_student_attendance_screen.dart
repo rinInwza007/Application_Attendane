@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
 import 'package:myproject2/presentation/screens/face/enhanced_realtime_face_detection_screen.dart';
 
 class EnhancedStudentAttendanceScreen extends StatefulWidget {
@@ -21,8 +22,8 @@ class EnhancedStudentAttendanceScreen extends StatefulWidget {
 }
 
 class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttendanceScreen> {
-  final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
-  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService(); // เพิ่ม service นี้
+  final UnifiedAttendanceService _attendanceService = UnifiedAttendanceService();
+  final UnifiedAttendanceService _simpleAttendanceService = UnifiedAttendanceService(); // เพิ่ม service นี้
   final AuthService _authService = AuthService();
   
   AttendanceSessionModel? _currentSession;
@@ -93,37 +94,34 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
   }
 
   Future<void> _checkFaceEnrollmentStatus() async {
-    try {
-      // Check both local and server enrollment status
-      final localHasFace = await _authService.hasFaceEmbedding();
-      
-      if (localHasFace && _isServerHealthy) {
-        // Verify with server
-        final userProfile = await _authService.getUserProfile();
-        if (userProfile != null) {
-          final studentId = userProfile['school_id'];
-          final serverResult = await _attendanceService.verifyFaceEnrollment(studentId);
-          setState(() {
-            _hasFaceEnrollment = serverResult['success'] && serverResult['has_face_data'];
-          });
-        } else {
-          setState(() => _hasFaceEnrollment = localHasFace);
-        }
-      } else {
-        setState(() => _hasFaceEnrollment = localHasFace);
-      }
-    } catch (e) {
-      print('❌ Error checking face enrollment: $e');
-      // Fallback to local check
-      final localHasFace = await _authService.hasFaceEmbedding();
-      setState(() => _hasFaceEnrollment = localHasFace);
+  try {
+    // Check local enrollment status first
+    final localHasFace = await _authService.hasFaceEmbedding();
+    
+    if (localHasFace) {
+      // If local has face data, we consider it enrolled
+      setState(() {
+        _hasFaceEnrollment = true;
+      });
+    } else {
+      // No local face data
+      setState(() {
+        _hasFaceEnrollment = false;
+      });
     }
+    
+  } catch (e) {
+    print('❌ Error checking face enrollment: $e');
+    setState(() {
+      _hasFaceEnrollment = false;
+    });
   }
+}
 
   Future<void> _loadCurrentSession() async {
     try {
       // ใช้ SimpleAttendanceService แทน AuthService
-      final session = await _simpleAttendanceService.getActiveSessionForClass(widget.classId);
+      final session = await _simpleAttendanceService.getActiveSession(widget.classId);
       
       setState(() => _currentSession = session);
       
@@ -143,7 +141,7 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
       if (userEmail == null) return;
 
       // ใช้ SimpleAttendanceService แทน AuthService
-      final records = await _simpleAttendanceService.getAttendanceRecords(_currentSession!.id);
+      final records = await _simpleAttendanceService.getSessionRecords(_currentSession!.id);
       final myRecord = records.where((r) => r.studentEmail == userEmail).firstOrNull;
       
       setState(() => _myAttendanceRecord = myRecord);
@@ -158,7 +156,7 @@ class _EnhancedStudentAttendanceScreenState extends State<EnhancedStudentAttenda
       if (userEmail == null) return;
 
       // ใช้ SimpleAttendanceService แทน AuthService
-      final history = await _simpleAttendanceService.getStudentAttendanceHistory(userEmail);
+      final history = await _simpleAttendanceService.getStudentHistory(userEmail);
       
       setState(() => _myAttendanceHistory = history);
     } catch (e) {

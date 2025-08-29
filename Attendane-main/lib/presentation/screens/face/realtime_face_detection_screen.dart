@@ -6,8 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:myproject2/data/services/face_recognition_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/unified_face_service.dart';
 
 class RealtimeFaceDetectionScreen extends StatefulWidget {
   final String? sessionId;
@@ -35,7 +35,7 @@ class _RealtimeFaceDetectionScreenState extends State<RealtimeFaceDetectionScree
   // Camera และ Face Detection
   CameraController? _cameraController;
   late final FaceDetector _faceDetector;
-  late final FaceRecognitionService _faceService;
+  late final UnifiedFaceService _faceService;
   late final AuthService _authService;
   
   // State Management
@@ -98,7 +98,7 @@ class _RealtimeFaceDetectionScreenState extends State<RealtimeFaceDetectionScree
         ),
       );
       
-      _faceService = FaceRecognitionService();
+      _faceService = UnifiedFaceService();
       _authService = AuthService();
       
       await _faceService.initialize();
@@ -369,7 +369,7 @@ class _RealtimeFaceDetectionScreenState extends State<RealtimeFaceDetectionScree
       final XFile imageFile = await _cameraController!.takePicture();
       
       // ประมวลผลใบหน้า
-      final embedding = await _faceService.getFaceEmbedding(imageFile.path);
+      final embedding = await _faceService.generateEmbedding(imageFile.path);
       
       if (widget.isRegistration) {
         // สำหรับการลงทะเบียน
