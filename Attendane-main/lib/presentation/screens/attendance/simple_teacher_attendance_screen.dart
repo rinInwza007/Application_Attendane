@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/models/webcam_config_model.dart'; // เพิ่ม import
-import 'package:myproject2/data/services/attendance_service.dart';
 
 class SimpleTeacherAttendanceScreen extends StatefulWidget {
   final String classId;

@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
-import 'package:myproject2/data/services/attendance_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
 import 'package:myproject2/presentation/screens/face/realtime_face_detection_screen.dart';
 
 class UpdatedStudentAttendanceScreen extends StatefulWidget {
@@ -22,7 +22,7 @@ class UpdatedStudentAttendanceScreen extends StatefulWidget {
 }
 
 class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanceScreen> {
-  final SimpleAttendanceService _attendanceService = SimpleAttendanceService();
+  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
   final AuthService _authService = AuthService();
   
   AttendanceSessionModel? _currentSession;
@@ -51,7 +51,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     setState(() => _isLoading = true);
     
     try {
-      final session = await _attendanceService.getActiveSessionForClass(widget.classId);
+      final session = await _attendanceService.getActiveSession(widget.classId);
       
       if (mounted) {
         setState(() => _currentSession = session);
@@ -76,7 +76,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
       final userEmail = _authService.getCurrentUserEmail();
       if (userEmail == null) return;
 
-      final records = await _attendanceService.getAttendanceRecords(_currentSession!.id);
+      final records = await _attendanceService.getSessionRecords(_currentSession!.id);
       final myRecord = records.where((r) => r.studentEmail == userEmail).firstOrNull;
       
       if (mounted) {
@@ -92,7 +92,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
       final userEmail = _authService.getCurrentUserEmail();
       if (userEmail == null) return;
 
-      final history = await _attendanceService.getStudentAttendanceHistory(userEmail);
+      final history = await _attendanceService.getStudentHistory(userEmail);
       
       if (mounted) {
         setState(() => _myAttendanceHistory = history);

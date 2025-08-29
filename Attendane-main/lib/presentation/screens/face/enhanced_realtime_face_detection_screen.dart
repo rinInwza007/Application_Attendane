@@ -5,16 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:myproject2/data/services/enhanced_attendance_service.dart';
-import 'package:myproject2/data/services/face_recognition_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
+import 'package:myproject2/data/services/unified_face_service.dart';
 
 class EnhancedRealtimeFaceDetectionScreen extends StatefulWidget {
   final String? sessionId;
   final bool isRegistration;
   final String? studentId;
   final String? studentEmail;
-  final EnhancedAttendanceService? attendanceService;
+  final UnifiedAttendanceService? attendanceService;
   final String? instructionText;
   final Function(List<double> embedding)? onFaceEmbeddingCaptured;
   final Function(String message)? onCheckInSuccess;
@@ -41,9 +41,9 @@ class _EnhancedRealtimeFaceDetectionScreenState extends State<EnhancedRealtimeFa
   // Camera และ Face Detection
   CameraController? _cameraController;
   late final FaceDetector _faceDetector;
-  late final FaceRecognitionService _faceService;
+  late final UnifiedFaceService _faceService;
   late final AuthService _authService;
-  late final EnhancedAttendanceService _attendanceService;
+  late final UnifiedAttendanceService _attendanceService;
   
   // State Management
   bool _isInitialized = false;
@@ -105,9 +105,9 @@ class _EnhancedRealtimeFaceDetectionScreenState extends State<EnhancedRealtimeFa
         ),
       );
       
-      _faceService = FaceRecognitionService();
+      _faceService = UnifiedFaceService();
       _authService = AuthService();
-      _attendanceService = widget.attendanceService ?? EnhancedAttendanceService();
+      _attendanceService = widget.attendanceService ?? UnifiedAttendanceService();
       
       await _faceService.initialize();
       await _initializeCamera();
@@ -424,7 +424,7 @@ class _EnhancedRealtimeFaceDetectionScreenState extends State<EnhancedRealtimeFa
   Future<void> _performEnhancedRegistration(String imagePath) async {
     try {
       // Use enhanced API for multiple image registration
-      final result = await _attendanceService.enrollFaceMultipleImages(
+      final result = await _attendanceService.enrollFaceMultiple(
         imagePaths: [imagePath],
         studentId: widget.studentId ?? '',
         studentEmail: widget.studentEmail ?? '',
@@ -453,7 +453,7 @@ class _EnhancedRealtimeFaceDetectionScreenState extends State<EnhancedRealtimeFa
 
   Future<void> _performEnhancedCheckIn(String imagePath) async {
     try {
-      final result = await _attendanceService.processPeriodicAttendance(
+      final result = await _attendanceService.processPeriodicCapture(
         imagePath: imagePath,
         sessionId: widget.sessionId ?? '',
         captureTime: DateTime.now(),

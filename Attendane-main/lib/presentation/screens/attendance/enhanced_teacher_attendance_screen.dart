@@ -6,10 +6,9 @@ import 'package:camera/camera.dart';
 import 'package:flutter/widgets.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
-import 'package:myproject2/data/services/enhanced_attendance_service.dart';
-import 'package:myproject2/data/services/enhanced_periodic_camera_service.dart';
-import 'package:myproject2/data/services/attendance_service.dart';
 import 'package:myproject2/data/services/auth_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
+import 'package:myproject2/data/services/unified_camera_service.dart';
 
 
 class EnhancedTeacherAttendanceScreen extends StatefulWidget {
@@ -30,9 +29,9 @@ class EnhancedTeacherAttendanceScreen extends StatefulWidget {
 class _EnhancedTeacherAttendanceScreenState 
     extends State<EnhancedTeacherAttendanceScreen> {
   
-  final EnhancedAttendanceService _attendanceService = EnhancedAttendanceService();
-  final EnhancedPeriodicCameraService _cameraService = EnhancedPeriodicCameraService();
-  final SimpleAttendanceService _simpleAttendanceService = SimpleAttendanceService();
+  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
+  final UnifiedCameraService _cameraService = UnifiedCameraService();
+  final UnifiedAttendanceService  _simpleAttendanceService = UnifiedAttendanceService ();
   final AuthService _authService = AuthService();
   
   // Session state

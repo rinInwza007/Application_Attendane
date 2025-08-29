@@ -4,8 +4,9 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
-import 'package:myproject2/data/services/attendance_service.dart';
-import 'package:myproject2/data/services/periodic_camera_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
+import 'package:myproject2/data/services/unified_camera_service.dart';
+
 
 class TeacherAttendanceManagementScreen extends StatefulWidget {
   final String classId;
@@ -22,8 +23,8 @@ class TeacherAttendanceManagementScreen extends StatefulWidget {
 }
 
 class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceManagementScreen> {
-  final SimpleAttendanceService _attendanceService = SimpleAttendanceService();
-  final PeriodicCameraService _cameraService = PeriodicCameraService();
+  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
+  final UnifiedCameraService  _cameraService = UnifiedCameraService ();
   
   AttendanceSessionModel? _currentSession;
   List<AttendanceRecordModel> _attendanceRecords = [];
@@ -83,7 +84,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     setState(() => _isLoading = true);
     
     try {
-      final session = await _attendanceService.getActiveSessionForClass(widget.classId);
+      final session = await _attendanceService.getActiveSession(widget.classId);
       
       if (mounted) {
         setState(() {
@@ -116,7 +117,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     if (_currentSession == null) return;
 
     try {
-      final records = await _attendanceService.getAttendanceRecords(_currentSession!.id);
+      final records = await _attendanceService.getSessionRecords(_currentSession!.id);
       
       if (mounted) {
         setState(() => _attendanceRecords = records);
@@ -149,7 +150,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
 
     try {
       // Create new attendance session
-      final session = await _attendanceService.createAttendanceSession(
+      final session = await _attendanceService.createSession(
         classId: widget.classId,
         durationHours: _sessionDurationHours,
         onTimeLimitMinutes: _onTimeLimitMinutes,
@@ -198,7 +199,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
       await _captureFinalAttendance();
       
       // End session in database
-      await _attendanceService.endAttendanceSession(_currentSession!.id);
+      await _attendanceService.endSession (_currentSession!.id);
       
       if (mounted) {
         setState(() {
@@ -239,7 +240,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
   Future<void> _captureFinalAttendance() async {
     try {
       print('📸 Taking final attendance snapshot...');
-      final imagePath = await _cameraService.captureSingleImage();
+      final imagePath = await _cameraService.captureImage();
       
       if (imagePath != null) {
         await _processAttendanceImage(imagePath, isFinalCapture: true);
@@ -427,7 +428,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: _isLoading ? null : () async {
-                        final imagePath = await _cameraService.captureSingleImage();
+                        final imagePath = await _cameraService.captureImage ();
                         if (imagePath != null) {
                           _showSnackBar('ถ่ายรูปเช็คชื่อเพิ่มเติมแล้ว', Colors.blue);
                         }
