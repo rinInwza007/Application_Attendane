@@ -1,38 +1,77 @@
 // lib/core/service_locator.dart
+// อัปเดตให้ใช้กับ Unified Service Architecture
+
 import 'package:get_it/get_it.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:myproject2/data/services/auth_service.dart';
-import 'package:myproject2/data/services/attendance_service.dart'; // ไม่ต้อง hide แล้วเพราะไม่มี AuthService ซ้ำ
-import 'package:myproject2/data/services/face_recognition_service.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart';
+import 'package:myproject2/data/services/unified_camera_service.dart';
+import 'package:myproject2/data/services/unified_face_service.dart';
 import 'package:myproject2/core/constants/app_constants.dart';
 
 final GetIt serviceLocator = GetIt.instance;
 
-/// Initialize all services and dependencies
+/// Initialize all services and dependencies using Unified Architecture
 Future<void> setupServiceLocator() async {
   try {
-    print('🔧 Setting up service locator...');
+    print('🔧 Setting up service locator with unified services...');
     
-    // Register external dependencies first
+    // Method 1: Use ServiceManager (Recommended)
+    await _setupWithServiceManager();
+    
+    // Method 2: Direct registration (Alternative)
+    // await _setupDirectRegistration();
+    
+    // Register additional utility services
     await _registerExternalDependencies();
-    
-    // Register core services
-    _registerCoreServices();
-    
-    // Register business services
-    _registerBusinessServices();
-    
-    // Register utility services
     _registerUtilityServices();
     
     // Verify all services are registered
     _verifyServiceRegistration();
     
-    print('✅ Service locator setup completed');
+    print('✅ Service locator setup completed with unified architecture');
   } catch (e) {
     print('❌ Service locator setup failed: $e');
     rethrow;
   }
+}
+
+/// Setup using ServiceManager (Recommended approach)
+Future<void> _setupWithServiceManager() async {
+  // Initialize the global services instance
+  await services.initialize();
+  
+  // Register ServiceManager instance
+  serviceLocator.registerSingleton<ServiceManager>(services);
+  
+  // Register individual services through ServiceManager
+  serviceLocator.registerLazySingleton<AuthService>(() => services.auth);
+  serviceLocator.registerLazySingleton<UnifiedAttendanceService>(() => services.attendance);
+  serviceLocator.registerLazySingleton<UnifiedCameraService>(() => services.camera);
+  serviceLocator.registerLazySingleton<UnifiedFaceService>(() => services.face);
+}
+
+/// Alternative: Direct registration of unified services
+Future<void> _setupDirectRegistration() async {
+  // Register Auth Service
+  serviceLocator.registerLazySingleton<AuthService>(() => AuthService());
+  
+  // Register Unified Services
+  serviceLocator.registerLazySingleton<UnifiedAttendanceService>(
+    () => UnifiedAttendanceService(),
+  );
+  
+  serviceLocator.registerLazySingleton<UnifiedCameraService>(
+    () => UnifiedCameraService(),
+  );
+  
+  serviceLocator.registerLazySingleton<UnifiedFaceService>(
+    () => UnifiedFaceService(),
+  );
+  
+  // Initialize face service
+  final faceService = serviceLocator<UnifiedFaceService>();
+  await faceService.initialize();
 }
 
 /// Register external dependencies that need async initialization
@@ -45,31 +84,8 @@ Future<void> _registerExternalDependencies() async {
   // e.g., Firebase, Analytics, Crash Reporting, etc.
 }
 
-/// Register core application services
-void _registerCoreServices() {
-  // Authentication Service (หลัก)
-  serviceLocator.registerLazySingleton<AuthService>(
-    () => AuthService(),
-  );
-  
-  // Face Recognition Service (ML/AI)
-  serviceLocator.registerLazySingleton<FaceRecognitionService>(
-    () => FaceRecognitionService(),
-  );
-  
-  // Simple Attendance Service (ใช้สำหรับฟีเจอร์พื้นฐาน)
-  serviceLocator.registerLazySingleton<SimpleAttendanceService>(
-    () => SimpleAttendanceService(),
-  );
-  
-  // Full Attendance Service (ใช้สำหรับฟีเจอร์ขั้นสูง)
-  serviceLocator.registerLazySingleton<AttendanceService>(
-    () => AttendanceService(),
-  );
-}
-
-/// Register business logic services
-void _registerBusinessServices() {
+/// Register utility services (enhanced for unified architecture)
+void _registerUtilityServices() {
   // Navigation Service
   serviceLocator.registerLazySingleton<NavigationService>(
     () => NavigationService(),
@@ -85,23 +101,6 @@ void _registerBusinessServices() {
     () => NotificationService(),
   );
   
-  // Analytics Service (conditional)
-  if (AppConstants.enableAnalytics) {
-    serviceLocator.registerLazySingleton<AnalyticsService>(
-      () => AnalyticsService(),
-    );
-  }
-  
-  // Crash Reporting Service (conditional)
-  if (AppConstants.enableCrashReporting) {
-    serviceLocator.registerLazySingleton<CrashReportingService>(
-      () => CrashReportingService(),
-    );
-  }
-}
-
-/// Register utility services
-void _registerUtilityServices() {
   // Logger Service
   serviceLocator.registerLazySingleton<LoggerService>(
     () => LoggerService(),
@@ -126,15 +125,28 @@ void _registerUtilityServices() {
   serviceLocator.registerLazySingleton<PermissionService>(
     () => PermissionService(),
   );
+  
+  // Conditional services
+  if (AppConstants.enableAnalytics) {
+    serviceLocator.registerLazySingleton<AnalyticsService>(
+      () => AnalyticsService(),
+    );
+  }
+  
+  if (AppConstants.enableCrashReporting) {
+    serviceLocator.registerLazySingleton<CrashReportingService>(
+      () => CrashReportingService(),
+    );
+  }
 }
 
 /// Verify that all critical services are properly registered
 void _verifyServiceRegistration() {
   final criticalServices = [
     AuthService,
-    FaceRecognitionService,
-    SimpleAttendanceService,
-    AttendanceService,
+    UnifiedAttendanceService,
+    UnifiedCameraService,
+    UnifiedFaceService,
     NavigationService,
     StorageService,
     LoggerService,
@@ -146,7 +158,15 @@ void _verifyServiceRegistration() {
     }
   }
   
-  print('✅ All critical services verified');
+  // Verify ServiceManager if using that approach
+  if (serviceLocator.isRegistered<ServiceManager>()) {
+    final serviceManager = serviceLocator<ServiceManager>();
+    if (!serviceManager.isReady) {
+      throw ServiceLocatorException('ServiceManager is not ready');
+    }
+  }
+  
+  print('✅ All critical unified services verified');
 }
 
 /// Clean up all services (call this when app is terminated)
@@ -154,8 +174,11 @@ Future<void> disposeServiceLocator() async {
   try {
     print('🧹 Disposing service locator...');
     
-    // Manually dispose services that need cleanup
-    await _disposeServicesManually();
+    // Dispose unified services properly
+    await _disposeUnifiedServices();
+    
+    // Dispose utility services
+    await _disposeUtilityServices();
     
     // Reset GetIt instance
     await serviceLocator.reset();
@@ -166,16 +189,39 @@ Future<void> disposeServiceLocator() async {
   }
 }
 
-/// Manually dispose services that need cleanup
-Future<void> _disposeServicesManually() async {
+/// Dispose unified services properly
+Future<void> _disposeUnifiedServices() async {
   try {
-    // Dispose FaceRecognitionService
-    if (serviceLocator.isRegistered<FaceRecognitionService>()) {
-      final faceService = serviceLocator<FaceRecognitionService>();
-      await faceService.dispose();
+    // If using ServiceManager, dispose it
+    if (serviceLocator.isRegistered<ServiceManager>()) {
+      final serviceManager = serviceLocator<ServiceManager>();
+      await serviceManager.dispose();
+    } else {
+      // Dispose individual services
+      if (serviceLocator.isRegistered<UnifiedFaceService>()) {
+        final faceService = serviceLocator<UnifiedFaceService>();
+        await faceService.dispose();
+      }
+      
+      if (serviceLocator.isRegistered<UnifiedCameraService>()) {
+        final cameraService = serviceLocator<UnifiedCameraService>();
+        await cameraService.dispose();
+      }
+      
+      if (serviceLocator.isRegistered<UnifiedAttendanceService>()) {
+        final attendanceService = serviceLocator<UnifiedAttendanceService>();
+        attendanceService.dispose();
+      }
     }
     
-    // Dispose other services as needed
+  } catch (e) {
+    print('⚠️ Error disposing unified services: $e');
+  }
+}
+
+/// Dispose utility services
+Future<void> _disposeUtilityServices() async {
+  try {
     if (serviceLocator.isRegistered<NetworkService>()) {
       final networkService = serviceLocator<NetworkService>();
       networkService.dispose();
@@ -186,12 +232,80 @@ Future<void> _disposeServicesManually() async {
       notificationService.dispose();
     }
     
+    if (serviceLocator.isRegistered<FileService>()) {
+      final fileService = serviceLocator<FileService>();
+      fileService.dispose();
+    }
+    
   } catch (e) {
-    print('⚠️ Error in manual service disposal: $e');
+    print('⚠️ Error disposing utility services: $e');
   }
 }
 
-// ==================== Service Implementations ====================
+// ==================== Enhanced Service Health Check ====================
+
+/// Comprehensive health check for all services
+Future<Map<String, bool>> checkAllServicesHealth() async {
+  final healthResults = <String, bool>{};
+  
+  try {
+    // Check ServiceManager health (if using it)
+    if (serviceLocator.isRegistered<ServiceManager>()) {
+      final serviceManager = serviceLocator<ServiceManager>();
+      final unifiedHealth = await serviceManager.healthCheck();
+      healthResults.addAll(unifiedHealth);
+    } else {
+      // Check individual unified services
+      healthResults['auth'] = serviceLocator.isRegistered<AuthService>();
+      healthResults['attendance'] = serviceLocator.isRegistered<UnifiedAttendanceService>();
+      healthResults['camera'] = serviceLocator.isRegistered<UnifiedCameraService>() && 
+                               serviceLocator<UnifiedCameraService>().isHealthy();
+      healthResults['face'] = serviceLocator.isRegistered<UnifiedFaceService>() && 
+                             serviceLocator<UnifiedFaceService>().isInitialized;
+    }
+    
+    // Check utility services
+    healthResults['storage'] = serviceLocator.isRegistered<StorageService>();
+    healthResults['logger'] = serviceLocator.isRegistered<LoggerService>();
+    healthResults['validation'] = serviceLocator.isRegistered<ValidationService>();
+    
+  } catch (e) {
+    print('❌ Error in health check: $e');
+    healthResults['health_check_error'] = false;
+  }
+  
+  return healthResults;
+}
+
+/// Restart services if needed
+Future<bool> restartUnhealthyServices() async {
+  try {
+    final health = await checkAllServicesHealth();
+    final unhealthyServices = health.entries.where((e) => !e.value).map((e) => e.key).toList();
+    
+    if (unhealthyServices.isNotEmpty) {
+      print('🔧 Restarting unhealthy services: ${unhealthyServices.join(", ")}');
+      
+      // If using ServiceManager, use its restart functionality
+      if (serviceLocator.isRegistered<ServiceManager>()) {
+        final serviceManager = serviceLocator<ServiceManager>();
+        
+        for (final serviceName in unhealthyServices) {
+          await serviceManager.restartService(serviceName);
+        }
+      }
+      
+      return true;
+    }
+    
+    return false;
+  } catch (e) {
+    print('❌ Error restarting services: $e');
+    return false;
+  }
+}
+
+// ==================== Service Implementations (Updated) ====================
 
 class NavigationService {
   void dispose() {
@@ -235,6 +349,31 @@ class StorageService {
   
   String? getAuthToken() {
     return _prefs.getString(AppConstants.tokenKey);
+  }
+  
+  // Enhanced: Service-specific settings
+  Future<void> setCameraResolution(String resolution) async {
+    await _prefs.setString('camera_resolution', resolution);
+  }
+  
+  String getCameraResolution() {
+    return _prefs.getString('camera_resolution') ?? 'high';
+  }
+  
+  Future<void> setFaceThreshold(double threshold) async {
+    await _prefs.setDouble('face_threshold', threshold);
+  }
+  
+  double getFaceThreshold() {
+    return _prefs.getDouble('face_threshold') ?? 0.7;
+  }
+  
+  Future<void> setPeriodicCaptureInterval(int minutes) async {
+    await _prefs.setInt('periodic_capture_interval', minutes);
+  }
+  
+  int getPeriodicCaptureInterval() {
+    return _prefs.getInt('periodic_capture_interval') ?? 5;
   }
   
   // App Settings
@@ -301,6 +440,28 @@ class NotificationService {
   }) async {
     // TODO: Schedule notification
   }
+  
+  // Enhanced: Attendance-specific notifications
+  Future<void> notifySessionStarted(String className) async {
+    await showLocalNotification(
+      title: 'Attendance Session Started',
+      body: 'Session for $className has started',
+    );
+  }
+  
+  Future<void> notifyCheckInSuccess(String className) async {
+    await showLocalNotification(
+      title: 'Check-in Successful',
+      body: 'You have been marked present for $className',
+    );
+  }
+  
+  Future<void> notifySessionEnding(String className, int minutesLeft) async {
+    await showLocalNotification(
+      title: 'Session Ending Soon',
+      body: '$className session will end in $minutesLeft minutes',
+    );
+  }
 }
 
 class AnalyticsService {
@@ -327,6 +488,33 @@ class AnalyticsService {
       // TODO: Set analytics user property
       print('📊 Analytics: Set user property $name = $value');
     }
+  }
+  
+  // Enhanced: Attendance-specific analytics
+  void trackSessionCreated(String classId, int duration) {
+    trackEvent('session_created', {
+      'class_id': classId,
+      'duration_hours': duration,
+    });
+  }
+  
+  void trackCheckIn(String method, bool success) {
+    trackEvent('check_in_attempt', {
+      'method': method, // 'simple' or 'face'
+      'success': success,
+    });
+  }
+  
+  void trackFaceEnrollment(bool success) {
+    trackEvent('face_enrollment', {
+      'success': success,
+    });
+  }
+  
+  void trackPeriodicCapture(int facesDetected) {
+    trackEvent('periodic_capture', {
+      'faces_detected': facesDetected,
+    });
   }
 }
 
@@ -389,6 +577,15 @@ class LoggerService {
       print('🐛 DEBUG: $message');
       if (extra != null) print('Extra: $extra');
     }
+  }
+  
+  // Enhanced: Service-specific logging
+  void logServiceEvent(String service, String event, {Map<String, dynamic>? data}) {
+    logInfo('$service: $event', extra: data);
+  }
+  
+  void logPerformance(String operation, Duration duration) {
+    logDebug('Performance: $operation took ${duration.inMilliseconds}ms');
   }
   
   void dispose() {
@@ -474,6 +671,28 @@ class ValidationService {
     return null;
   }
   
+  // Enhanced: Service-specific validations
+  String? validateSessionDuration(int? hours) {
+    if (hours == null || hours < 1 || hours > 8) {
+      return 'Session duration must be between 1 and 8 hours';
+    }
+    return null;
+  }
+  
+  String? validateCaptureInterval(int? minutes) {
+    if (minutes == null || minutes < 1 || minutes > 30) {
+      return 'Capture interval must be between 1 and 30 minutes';
+    }
+    return null;
+  }
+  
+  String? validateFaceThreshold(double? threshold) {
+    if (threshold == null || threshold < 0.1 || threshold > 1.0) {
+      return 'Face threshold must be between 0.1 and 1.0';
+    }
+    return null;
+  }
+  
   void dispose() {
     // Validation service doesn't need disposal
   }
@@ -503,6 +722,17 @@ class FileService {
     // TODO: Implement file existence check
     throw UnimplementedError('fileExists not implemented');
   }
+  
+  // Enhanced: Image and attendance file management
+  Future<List<String>> getOldCaptureFiles(int maxAgeHours) async {
+    // TODO: Get old capture files for cleanup
+    throw UnimplementedError('getOldCaptureFiles not implemented');
+  }
+  
+  Future<void> cleanupCaptureFiles(int maxAgeHours) async {
+    // TODO: Cleanup old capture files
+    throw UnimplementedError('cleanupCaptureFiles not implemented');
+  }
 }
 
 class NetworkService {
@@ -518,6 +748,12 @@ class NetworkService {
   Stream<bool> get connectivityStream {
     // TODO: Implement connectivity stream
     throw UnimplementedError('connectivityStream not implemented');
+  }
+  
+  // Enhanced: API server connectivity
+  Future<bool> canReachAttendanceServer() async {
+    // TODO: Check if attendance API server is reachable
+    throw UnimplementedError('canReachAttendanceServer not implemented');
   }
 }
 
@@ -544,6 +780,15 @@ class PermissionService {
   Future<bool> hasPermission(String permission) async {
     // TODO: Implement permission check
     throw UnimplementedError('hasPermission not implemented');
+  }
+  
+  // Enhanced: Attendance-specific permissions
+  Future<bool> requestAllAttendancePermissions() async {
+    final cameraGranted = await requestCameraPermission();
+    final storageGranted = await requestStoragePermission();
+    final notificationGranted = await requestNotificationPermission();
+    
+    return cameraGranted && storageGranted && notificationGranted;
   }
 }
 
@@ -581,19 +826,22 @@ class ServiceLocatorException implements Exception {
   String toString() => 'ServiceLocatorException: $message';
 }
 
-// ==================== Convenience Methods ====================
+// ==================== Convenience Methods (Updated) ====================
 
 /// Get auth service instance
 AuthService get authService => serviceLocator<AuthService>();
 
-/// Get face recognition service instance
-FaceRecognitionService get faceRecognitionService => serviceLocator<FaceRecognitionService>();
+/// Get unified attendance service instance
+UnifiedAttendanceService get unifiedAttendanceService => serviceLocator<UnifiedAttendanceService>();
 
-/// Get simple attendance service instance
-SimpleAttendanceService get simpleAttendanceService => serviceLocator<SimpleAttendanceService>();
+/// Get unified camera service instance
+UnifiedCameraService get unifiedCameraService => serviceLocator<UnifiedCameraService>();
 
-/// Get full attendance service instance
-AttendanceService get attendanceService => serviceLocator<AttendanceService>();
+/// Get unified face service instance
+UnifiedFaceService get unifiedFaceService => serviceLocator<UnifiedFaceService>();
+
+/// Get service manager instance (if using ServiceManager approach)
+ServiceManager get serviceManager => serviceLocator<ServiceManager>();
 
 /// Get storage service instance
 StorageService get storageService => serviceLocator<StorageService>();
@@ -603,3 +851,12 @@ LoggerService get loggerService => serviceLocator<LoggerService>();
 
 /// Get validation service instance
 ValidationService get validationService => serviceLocator<ValidationService>();
+
+/// Get notification service instance
+NotificationService get notificationService => serviceLocator<NotificationService>();
+
+/// Get analytics service instance (if enabled)
+AnalyticsService? get analyticsService => serviceLocator.getSafe<AnalyticsService>();
+
+/// Get crash reporting service instance (if enabled)
+CrashReportingService? get crashReportingService => serviceLocator.getSafe<CrashReportingService>();
