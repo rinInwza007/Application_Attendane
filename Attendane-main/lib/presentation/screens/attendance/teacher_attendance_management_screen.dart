@@ -80,38 +80,26 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     }
   }
 
-  Future<void> _loadCurrentSession() async {
-    setState(() => _isLoading = true);
+  Future<void> _loadSessionRecords() async {
+  if (_currentSession == null) return;
+  
+  try {
+    // ใช้ getSessionRecords แทน getAttendanceRecords
+    final records = await _attendanceService.getSessionRecords(_currentSession!.id);
     
-    try {
-      final session = await _attendanceService.getActiveSession(widget.classId);
-      
-      if (mounted) {
-        setState(() {
-          _currentSession = session;
-          _isSessionActive = session?.isActive ?? false;
-        });
-
-        if (session != null) {
-          await _loadAttendanceRecords();
-          _startAutoRefresh();
-          
-          // If session is active and camera is ready, start capture
-          if (_isSessionActive && _isCameraReady) {
-            _startPeriodicCapture();
-          }
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        _showSnackBar('ไม่สามารถโหลดข้อมูลเซสชันได้: $e', Colors.red);
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+    if (mounted) {
+      setState(() {
+        _attendanceRecords = records;
+      });
+    }
+    
+  } catch (e) {
+    print('❌ Error loading session records: $e');
+    if (mounted) {
+      _showSnackBar('ไม่สามารถโหลดข้อมูลการเข้าเรียนได้: $e', Colors.red);
     }
   }
+}
 
   Future<void> _loadAttendanceRecords() async {
     if (_currentSession == null) return;
@@ -137,6 +125,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
       }
     });
   }
+
 
   // ========== Session Management ==========
   
@@ -164,7 +153,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
         });
 
         _startAutoRefresh();
-        _startPeriodicCapture();
+        startPeriodicCapture();
         
         _showSnackBar('เริ่มคาบเรียนและการเช็คชื่ออัตโนมัติแล้ว', Colors.green);
       }
@@ -223,14 +212,11 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
 
   // ========== Camera Management ==========
   
-  void _startPeriodicCapture() {
-    if (!_isCameraReady || !_isSessionActive) return;
-    
-    final interval = Duration(minutes: _captureIntervalMinutes);
-    _cameraService.startPeriodicCapture(interval: interval);
-    
-    print('📸 Started periodic capture every $_captureIntervalMinutes minutes');
-  }
+  Future<void> startPeriodicCapture({
+  required String sessionId,
+  Duration interval = const Duration(minutes: 5),
+  required Function(String imagePath, DateTime captureTime) onCapture,
+}) async {}
 
   void _stopPeriodicCapture() {
     _cameraService.stopPeriodicCapture();
