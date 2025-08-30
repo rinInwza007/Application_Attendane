@@ -9,7 +9,7 @@ import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/data/services/unified_attendance_service.dart';
 import 'package:myproject2/data/services/unified_camera_service.dart';
-
+import 'package:myproject2/core/service_locator.dart'; // เพิ่ม import
 
 class EnhancedTeacherAttendanceScreen extends StatefulWidget {
   final String classId;
@@ -29,10 +29,10 @@ class EnhancedTeacherAttendanceScreen extends StatefulWidget {
 class _EnhancedTeacherAttendanceScreenState 
     extends State<EnhancedTeacherAttendanceScreen> {
   
-  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
-  final UnifiedCameraService _cameraService = UnifiedCameraService();
-  final UnifiedAttendanceService  _simpleAttendanceService = UnifiedAttendanceService ();
-  final AuthService _authService = AuthService();
+  // ใช้ service locator แทนการสร้าง instance ใหม่
+  late final UnifiedAttendanceService _attendanceService;
+  late final UnifiedCameraService _cameraService;
+  late final AuthService _authService;
   
   // Session state
   AttendanceSessionModel? _currentSession;
@@ -44,6 +44,7 @@ class _EnhancedTeacherAttendanceScreenState
   bool _isSessionActive = false;
   bool _isCameraReady = false;
   bool _isServerHealthy = false;
+  bool _isPeriodicCaptureActive = false;
   
   // Session configuration
   int _sessionDurationHours = 2;
@@ -63,88 +64,118 @@ class _EnhancedTeacherAttendanceScreenState
   int _facesDetected = 0;
 
   @override
-void initState() {
-  super.initState();
-  _setupCameraCallbacks();
-  _initializeServices();
-}
+  void initState() {
+    super.initState();
+    _initializeServices();
+  }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
-    _cameraService.dispose();
-    _attendanceService.dispose();
+    _stopPeriodicCapture();
+    _clearCameraCallbacks();
     super.dispose();
   }
 
+  void _initializeServices() {
+    // ใช้ service locator
+    _attendanceService = serviceLocator<UnifiedAttendanceService>();
+    _cameraService = serviceLocator<UnifiedCameraService>();
+    _authService = serviceLocator<AuthService>();
+    
+    _setupCameraCallbacks();
+    _initializeSystem();
+  }
+
   void _setupCameraCallbacks() {
-  // Callback เมื่อถ่ายรูปสำเร็จ
-  _cameraService.onImageCaptured = (imagePath, captureTime) {
-    print('📸 Snapshot captured: ${imagePath.split('/').last} at $captureTime');
-    setState(() {
-      _totalSnapshots++;
-    });
-    _showSnackBar('📸 Snapshot captured - processing...', Colors.blue);
-  };
-
-  _cameraService.onAttendanceProcessed = (result) {
-    final facesDetected = result['faces_detected'] as int? ?? 0;
-    setState(() => _facesDetected += facesDetected);
-    _showSnackBar('✅ Auto-processed: $facesDetected faces', Colors.green);
-  };
-
-  _cameraService.onError = (error) {
-    _showSnackBar('❌ Camera error: $error', Colors.red);
-  };
-
-  _cameraService.onStatusChanged = (status) {
-    setState(() => _isCameraReady = status == CameraServiceStatus.ready);
-  };
-
-    // Callback เมื่อประมวลผล attendance สำเร็จ
-    _cameraService.onAttendanceProcessed = (result) {
-    print('✅ Attendance processed: $result');
-    final facesDetected = result['faces_detected'] as int? ?? 0;
-    final newRecords = result['new_attendance_records'] as int? ?? 0;
-    
-    setState(() {
-      _successfulCaptures++;
-      _facesDetected += facesDetected;
-    });
-    
-    if (facesDetected > 0) {
-      _showSnackBar('✅ Detected $facesDetected face(s), $newRecords new records', Colors.green);
-      _loadAttendanceRecords(); // Refresh records
-    } else {
-      _showSnackBar('📷 No faces detected in snapshot', Colors.orange);
-    }
-  };
+    // Callback เมื่อถ่ายรูปสำเร็จ
+    _cameraService.onImageCaptured = (imagePath, captureTime) {
+      print('📸 Snapshot captured: ${imagePath.split('/').last} at $captureTime');
+      setState(() {
+        _totalSnapshots++;
+      });
+      _showSnackBar('📸 Snapshot captured - processing...', Colors.blue);
+      
+      // Process the captured image for attendance
+      _processCapture(imagePath, captureTime);
+    };
 
     // Callback เมื่อเกิดข้อผิดพลาด
     _cameraService.onError = (error) {
-    print('❌ Camera error: $error');
-    _addError('Camera: $error');
-    _showSnackBar('❌ Camera error: $error', Colors.red);
-  };
+      print('❌ Camera error: $error');
+      _addError('Camera: $error');
+      _showSnackBar('❌ Camera error: $error', Colors.red);
+    };
 
-    // Callback เมื่อสถานะกล้องเปลี่ยน
-    _cameraService.onStatusChanged = (status) {
-    print('📸 Camera status: $status');
-    setState(() {
-      _isCameraReady = status == CameraServiceStatus.ready || 
-                      status == CameraServiceStatus.capturing;
-    });
-  };
+    // Callback เมื่อสถานะกล้องเปลี่ยน (แก้ไขจาก onStatusChanged)
+    _cameraService.onStateChanged = (state) {
+      print('📸 Camera state: $state');
+      setState(() {
+        _isCameraReady = state == CameraState.ready;
+      });
+    };
 
     // Callback เมื่อสถิติอัปเดต
     _cameraService.onStatsUpdated = (stats) {
-    setState(() {
-      _cameraStats = stats;
-    });
-  };
-}
+      setState(() {
+        _cameraStats = stats;
+      });
+    };
+  }
 
-  Future<void> _initializeServices() async {
+  void _clearCameraCallbacks() {
+    _cameraService.onImageCaptured = null;
+    _cameraService.onError = null;
+    _cameraService.onStateChanged = null;
+    _cameraService.onStatsUpdated = null;
+  }
+
+  // Method สำหรับประมวลผล capture
+  Future<void> _processCapture(String imagePath, DateTime captureTime) async {
+    try {
+      if (_currentSession == null) {
+        print('⚠️ No active session for processing capture');
+        return;
+      }
+
+      // ส่งรูปไปประมวลผลที่ server (แก้ไขจาก processPeriodicAttendance)
+      final result = await _attendanceService.processPeriodicCapture(
+        imagePath: imagePath,
+        sessionId: _currentSession!.id,
+        captureTime: captureTime,
+        deleteImageAfter: true,
+      );
+
+      if (result['success']) {
+        final data = result['data'];
+        final facesDetected = data['faces_detected'] as int? ?? 0;
+        final newRecords = data['new_attendance_records'] as int? ?? 0;
+        
+        setState(() {
+          _successfulCaptures++;
+          _facesDetected += facesDetected;
+        });
+        
+        print('✅ Attendance processed: $result');
+        
+        if (facesDetected > 0) {
+          _showSnackBar('✅ Detected $facesDetected face(s), $newRecords new records', Colors.green);
+          await _loadSessionRecords(); // แก้ไขจาก _loadAttendanceRecords
+        } else {
+          _showSnackBar('📷 No faces detected in snapshot', Colors.orange);
+        }
+      } else {
+        print('❌ Failed to process attendance: ${result['error']}');
+        _showSnackBar('❌ Processing failed: ${result['error']}', Colors.red);
+      }
+
+    } catch (e) {
+      print('❌ Error processing capture: $e');
+      _showSnackBar('❌ Processing error: $e', Colors.red);
+    }
+  }
+
+  Future<void> _initializeSystem() async {
     setState(() => _isLoading = true);
     
     try {
@@ -191,7 +222,8 @@ void initState() {
 
   Future<void> _loadCurrentSession() async {
     try {
-      final session = await _simpleAttendanceService.getActiveSessionForClass(widget.classId);
+      // แก้ไขจาก getActiveSessionForClass เป็น getActiveSession
+      final session = await _attendanceService.getActiveSession(widget.classId);
       
       setState(() {
         _currentSession = session;
@@ -199,7 +231,7 @@ void initState() {
       });
 
       if (session != null) {
-        await _loadAttendanceRecords();
+        await _loadSessionRecords();
         await _loadSessionStatistics();
         _startAutoRefresh();
         
@@ -214,11 +246,13 @@ void initState() {
     }
   }
 
-  Future<void> _loadAttendanceRecords() async {
+  // แก้ไขจาก _loadAttendanceRecords เป็น _loadSessionRecords
+  Future<void> _loadSessionRecords() async {
     if (_currentSession == null) return;
 
     try {
-      final records = await _simpleAttendanceService.getAttendanceRecords(_currentSession!.id);
+      // แก้ไขจาก getAttendanceRecords เป็น getSessionRecords
+      final records = await _attendanceService.getSessionRecords(_currentSession!.id);
       setState(() => _attendanceRecords = records);
     } catch (e) {
       _addError('Load records: $e');
@@ -230,18 +264,40 @@ void initState() {
     if (_currentSession == null) return;
 
     try {
-      final stats = await _attendanceService.getSessionStatistics(_currentSession!.id);
+      // ลบ getSessionStatistics method ที่ไม่มีใน UnifiedAttendanceService
+      // แทนที่ด้วยการคำนวณ stats เอง
+      final stats = _calculateSessionStatistics();
       setState(() => _sessionStats = stats);
     } catch (e) {
       print('⚠️ Error loading session statistics: $e');
     }
   }
 
+  Map<String, dynamic> _calculateSessionStatistics() {
+    if (_attendanceRecords.isEmpty) {
+      return {'statistics': {'total_students': 0, 'present_count': 0, 'late_count': 0, 'attendance_rate': 0.0}};
+    }
+
+    final presentCount = _attendanceRecords.where((r) => r.status == 'present').length;
+    final lateCount = _attendanceRecords.where((r) => r.status == 'late').length;
+    final totalStudents = _attendanceRecords.length;
+    final attendanceRate = totalStudents > 0 ? (presentCount + lateCount) / totalStudents : 0.0;
+
+    return {
+      'statistics': {
+        'total_students': totalStudents,
+        'present_count': presentCount,
+        'late_count': lateCount,
+        'attendance_rate': attendanceRate,
+      }
+    };
+  }
+
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
       if (_isSessionActive && _currentSession != null) {
-        _loadAttendanceRecords();
+        _loadSessionRecords(); // แก้ไขจาก _loadAttendanceRecords
         _loadSessionStatistics();
       } else {
         timer.cancel();
@@ -252,88 +308,88 @@ void initState() {
   // ========== 📍 Start Class Workflow ==========
   
   Future<void> _startAttendanceSession() async {
-  if (!_isCameraReady || !_isServerHealthy) {
-    _showSnackBar('Camera or server not ready', Colors.orange);
-    return;
-  }
-
-  setState(() => _isLoading = true);
-
-  try {
-    print('🚀 Starting enhanced attendance session...');
-    
-    // 📸 ถ่ายรูปเริ่มคาบเรียนก่อน
-    final imagePath = await _cameraService.captureSingleImage();
-    if (imagePath == null) {
-      throw Exception('Failed to capture initial image');
-    }
-    
-    // 🎯 เริ่มคาบเรียนพร้อมส่งรูปไป FastAPI
-    final result = await _attendanceService.startClassSession(
-      classId: widget.classId,
-      teacherEmail: _authService.getCurrentUserEmail()!,
-      initialImagePath: imagePath,
-      durationHours: _sessionDurationHours,
-      captureIntervalMinutes: _captureIntervalMinutes,
-      onTimeLimitMinutes: _onTimeLimitMinutes,
-    );
-
-    if (!result['success']) {
-      throw Exception(result['error'] ?? 'Failed to start session');
+    if (!_isCameraReady || !_isServerHealthy) {
+      _showSnackBar('Camera or server not ready', Colors.orange);
+      return;
     }
 
-    // 📊 สร้าง session ใน Supabase (เพื่อใช้กับ Flutter UI)
-    final supabaseSession = await _simpleAttendanceService.createAttendanceSession(
-      classId: widget.classId,
-      durationHours: _sessionDurationHours,
-      onTimeLimitMinutes: _onTimeLimitMinutes,
-    );
+    setState(() => _isLoading = true);
 
-    setState(() {
-      _currentSession = supabaseSession;
-      _isSessionActive = true;
-      _attendanceRecords = [];
-      _sessionStats = {};
-      _totalSnapshots = 1; // เริ่มต้นด้วย initial snapshot
-      _successfulCaptures = 1;
-      _facesDetected = result['faces_detected'] ?? 0;
-    });
-
-    // 🔄 เริ่ม periodic capture
-    await _startPeriodicCapture();
-    
-    _startAutoRefresh();
-    _showSnackBar('🎯 Class started! Initial attendance captured automatically', Colors.green);
-    
-    // ลบรูปชั่วคราว
     try {
-      await File(imagePath).delete();
+      print('🚀 Starting enhanced attendance session...');
+      
+      // 📸 ถ่ายรูปเริ่มคาบเรียนก่อน (แก้ไขจาก captureSingleImage)
+      final imagePath = await _cameraService.captureImage();
+      if (imagePath == null) {
+        throw Exception('Failed to capture initial image');
+      }
+      
+      // 🎯 เริ่มคาบเรียนพร้อมส่งรูปไป FastAPI
+      final result = await _attendanceService.startClassSession(
+        classId: widget.classId,
+        teacherEmail: _authService.getCurrentUserEmail()!,
+        initialImagePath: imagePath,
+        durationHours: _sessionDurationHours,
+        captureIntervalMinutes: _captureIntervalMinutes,
+        onTimeLimitMinutes: _onTimeLimitMinutes,
+      );
+
+      if (!result['success']) {
+        throw Exception(result['error'] ?? 'Failed to start session');
+      }
+
+      // 📊 สร้าง session ใน Supabase (แก้ไขจาก createAttendanceSession เป็น createSession)
+      final supabaseSession = await _attendanceService.createSession(
+        classId: widget.classId,
+        durationHours: _sessionDurationHours,
+        onTimeLimitMinutes: _onTimeLimitMinutes,
+      );
+
+      setState(() {
+        _currentSession = supabaseSession;
+        _isSessionActive = true;
+        _attendanceRecords = [];
+        _sessionStats = {};
+        _totalSnapshots = 1; // เริ่มต้นด้วย initial snapshot
+        _successfulCaptures = 1;
+        _facesDetected = result['data']?['faces_detected'] ?? 0;
+      });
+
+      // 🔄 เริ่ม periodic capture
+      await _startPeriodicCapture();
+      
+      _startAutoRefresh();
+      _showSnackBar('🎯 Class started! Initial attendance captured automatically', Colors.green);
+      
+      // ลบรูปชั่วคราว
+      try {
+        await File(imagePath).delete();
+      } catch (e) {
+        print('Warning: Could not delete temporary image: $e');
+      }
+      
     } catch (e) {
-      print('Warning: Could not delete temporary image: $e');
+      _addError('Start session: $e');
+      _showErrorDialog('Failed to Start Session', e.toString());
+    } finally {
+      setState(() => _isLoading = false);
     }
-    
-  } catch (e) {
-    _addError('Start session: $e');
-    _showErrorDialog('Failed to Start Session', e.toString());
-  } finally {
-    setState(() => _isLoading = false);
   }
-}
 
   Future<void> _takeStartClassSnapshot() async {
     try {
       print('📸 Taking start-of-class snapshot...');
-      final imagePath = await _cameraService.captureSingleImage();
+      final imagePath = await _cameraService.captureImage(); // แก้ไขจาก captureSingleImage
       
       if (imagePath != null && _currentSession != null) {
-        final result = await _attendanceService.processPeriodicAttendance(
+        final result = await _attendanceService.processPeriodicCapture( // แก้ไข method name
           imagePath: imagePath,
           sessionId: _currentSession!.id,
           captureTime: DateTime.now(),
         );
         
         if (result['success']) {
-          final facesDetected = result['faces_detected'] as int? ?? 0;
+          final facesDetected = result['data']?['faces_detected'] ?? 0;
           _showSnackBar('🎯 Start snapshot: $facesDetected face(s) detected', Colors.blue);
         }
       }
@@ -348,10 +404,18 @@ void initState() {
     if (_currentSession == null || !_isCameraReady) return;
 
     try {
+      // แก้ไข method call ให้ตรงกับ UnifiedCameraService
       await _cameraService.startPeriodicCapture(
-        session: _currentSession!,
+        sessionId: _currentSession!.id, // แก้ไขจาก session: เป็น sessionId:
         interval: Duration(minutes: _captureIntervalMinutes),
+        onCapture: (imagePath, captureTime) async {
+          await _handlePeriodicCapture(imagePath, captureTime);
+        },
       );
+      
+      setState(() {
+        _isPeriodicCaptureActive = true;
+      });
       
       print('📸 Periodic capture started - every $_captureIntervalMinutes minutes');
       _showSnackBar('📷 Auto-capture started every $_captureIntervalMinutes minutes', Colors.blue);
@@ -361,17 +425,43 @@ void initState() {
     }
   }
 
+  Future<void> _handlePeriodicCapture(String imagePath, DateTime captureTime) async {
+    try {
+      print('📷 Processing periodic capture: ${imagePath.split('/').last}');
+      
+      setState(() {
+        _totalSnapshots++;
+      });
+      
+      // Process attendance
+      await _processCapture(imagePath, captureTime);
+      
+    } catch (e) {
+      print('❌ Error in periodic capture handler: $e');
+    }
+  }
+
   Future<void> _resumePeriodicCapture() async {
     if (_currentSession == null || !_isSessionActive) return;
 
     try {
-      if (!_cameraService.isRunning) {
+      if (!_cameraService.isCapturing) { // แก้ไขจาก isRunning
         await _startPeriodicCapture();
         print('📸 Resumed periodic capture for existing session');
       }
     } catch (e) {
       print('⚠️ Error resuming capture: $e');
     }
+  }
+
+  void _stopPeriodicCapture() {
+    _cameraService.stopPeriodicCapture();
+    
+    setState(() {
+      _isPeriodicCaptureActive = false;
+    });
+    
+    print('⏹️ Stopped periodic capture');
   }
 
   // ========== 📍 End Class Workflow ==========
@@ -395,16 +485,13 @@ void initState() {
 
     try {
       // Stop periodic capture first
-      await _cameraService.stopPeriodicCapture();
+      _stopPeriodicCapture();
       
       // 📍 Take final snapshot when ending class
       await _takeFinalClassSnapshot();
       
-      // End session in FastAPI
+      // End session (แก้ไขจาก endAttendanceSession เป็น endSession)
       await _attendanceService.endSession(_currentSession!.id);
-      
-      // End session in Supabase
-      await _simpleAttendanceService.endAttendanceSession(_currentSession!.id);
       
       // Final statistics load
       await _loadSessionStatistics();
@@ -432,17 +519,17 @@ void initState() {
       print('📸 Taking final class snapshot...');
       _showSnackBar('📸 Taking final attendance snapshot...', Colors.blue);
       
-      final imagePath = await _cameraService.captureSingleImage();
+      final imagePath = await _cameraService.captureImage(); // แก้ไขจาก captureSingleImage
       
       if (imagePath != null && _currentSession != null) {
-        final result = await _attendanceService.processPeriodicAttendance(
+        final result = await _attendanceService.processPeriodicCapture( // แก้ไข method name
           imagePath: imagePath,
           sessionId: _currentSession!.id,
           captureTime: DateTime.now(),
         );
         
         if (result['success']) {
-          final facesDetected = result['faces_detected'] as int? ?? 0;
+          final facesDetected = result['data']?['faces_detected'] ?? 0;
           print('✅ Final snapshot processed: $facesDetected faces');
           _showSnackBar('🎯 Final snapshot: $facesDetected face(s) detected', Colors.green);
         }
@@ -454,144 +541,125 @@ void initState() {
 
   // ========== Manual Actions ==========
   
- Future<void> _captureManualSnapshot() async {
-  if (!_isCameraReady || _currentSession == null) return;
+  Future<void> _captureManualSnapshot() async {
+    if (!_isCameraReady || _currentSession == null) return;
 
-  try {
-    setState(() => _isLoading = true);
-    
-    _showSnackBar('📸 Taking manual snapshot...', Colors.blue);
-    
-    final imagePath = await _cameraService.captureSingleImage();
-    if (imagePath == null) return;
-
-    // ส่งไป FastAPI แทนที่จะใช้ mock data
-    final result = await _attendanceService.captureManualAttendance(
-      sessionId: _currentSession!.id,
-      imagePath: imagePath,
-    );
-
-    if (result['success']) {
-      final facesDetected = result['faces_detected'] as int? ?? 0;
-      _showSnackBar('📷 Manual snapshot: $facesDetected face(s) detected, processing...', Colors.green);
-      
-      setState(() {
-        _totalSnapshots++;
-        _successfulCaptures++;
-        _facesDetected += facesDetected;
-      });
-      
-      await _loadAttendanceRecords();
-      await _loadSessionStatistics();
-    } else {
-      _showSnackBar('❌ Manual snapshot failed: ${result['error'] ?? 'Unknown error'}', Colors.red);
-    }
-
-    // ลบรูปชั่วคราว
     try {
-      await File(imagePath).delete();
-    } catch (e) {
-      print('Warning: Could not delete temporary image: $e');
-    }
+      setState(() => _isLoading = true);
+      
+      _showSnackBar('📸 Taking manual snapshot...', Colors.blue);
+      
+      final imagePath = await _cameraService.captureImage(); // แก้ไขจาก captureSingleImage
+      if (imagePath == null) return;
 
-  } catch (e) {
-    _addError('Manual capture: $e');
-    _showSnackBar('❌ Manual snapshot error: $e', Colors.red);
-  } finally {
-    setState(() => _isLoading = false);
+      // ประมวลผลรูป
+      await _processCapture(imagePath, DateTime.now());
+
+      // ลบรูปชั่วคราว
+      try {
+        await File(imagePath).delete();
+      } catch (e) {
+        print('Warning: Could not delete temporary image: $e');
+      }
+
+    } catch (e) {
+      _addError('Manual capture: $e');
+      _showSnackBar('❌ Manual snapshot error: $e', Colors.red);
+    } finally {
+      setState(() => _isLoading = false);
+    }
   }
-}
 
   // ========== Session Summary ==========
   
   void _showSessionSummaryDialog() {
-  final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
-  final totalStudents = stats['total_students'] ?? 0;
-  final presentCount = stats['present_count'] ?? 0;
-  final lateCount = stats['late_count'] ?? 0;
-  final attendanceRate = stats['attendance_rate'] ?? 0.0;
-  
-  showDialog(
-    context: context,
-    barrierDismissible: false,
-    builder: (context) => AlertDialog(
-      title: const Row(
-        children: [
-          Icon(Icons.summarize, color: Colors.green),
-          SizedBox(width: 12),
-          Text('Class Session Summary'),
-        ],
-      ),
-      content: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
+    final stats = _sessionStats['statistics'] as Map<String, dynamic>? ?? {};
+    final totalStudents = stats['total_students'] ?? 0;
+    final presentCount = stats['present_count'] ?? 0;
+    final lateCount = stats['late_count'] ?? 0;
+    final attendanceRate = stats['attendance_rate'] ?? 0.0;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Row(
           children: [
-            Text(
-              'Class: ${widget.className}',
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 16),
-            
-            _buildSummaryRow('Total Students', '$totalStudents'),
-            _buildSummaryRow('Present', '$presentCount'),
-            _buildSummaryRow('Late', '$lateCount'),
-            _buildSummaryRow('Attendance Rate', '${(attendanceRate * 100).toStringAsFixed(1)}%'),
-            
-            const Divider(height: 24),
-            
-            _buildSummaryRow('Total Snapshots', '$_totalSnapshots'),
-            _buildSummaryRow('Successful Captures', '$_successfulCaptures'),
-            _buildSummaryRow('Faces Detected', '$_facesDetected'),
-            _buildSummaryRow('Face Detection Rate', 
-              _successfulCaptures > 0 
-                ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
-                : '0 faces/snapshot'),
-            
-            const SizedBox(height: 16),
-            
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.green.shade50,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.green.shade200),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.check_circle, color: Colors.green),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Class session completed successfully!',
-                      style: TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            Icon(Icons.summarize, color: Colors.green),
+            SizedBox(width: 12),
+            Text('Class Session Summary'),
           ],
         ),
-      ),
-      actions: [
-        ElevatedButton(
-          onPressed: () => Navigator.of(context).pop(),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.green,
-            foregroundColor: Colors.white,
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Class: ${widget.className}',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              
+              _buildSummaryRow('Total Students', '$totalStudents'),
+              _buildSummaryRow('Present', '$presentCount'),
+              _buildSummaryRow('Late', '$lateCount'),
+              _buildSummaryRow('Attendance Rate', '${(attendanceRate * 100).toStringAsFixed(1)}%'),
+              
+              const Divider(height: 24),
+              
+              _buildSummaryRow('Total Snapshots', '$_totalSnapshots'),
+              _buildSummaryRow('Successful Captures', '$_successfulCaptures'),
+              _buildSummaryRow('Faces Detected', '$_facesDetected'),
+              _buildSummaryRow('Face Detection Rate', 
+                _successfulCaptures > 0 
+                  ? '${(_facesDetected / _successfulCaptures).toStringAsFixed(1)} faces/snapshot'
+                  : '0 faces/snapshot'),
+              
+              const SizedBox(height: 16),
+              
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.green),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Class session completed successfully!',
+                        style: TextStyle(
+                          color: Colors.green,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          child: const Text('Close'),
         ),
-      ],
-    ),
-  );
-}
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildSummaryRow(String label, String value) {
     return Padding(
@@ -816,15 +884,15 @@ void initState() {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              _cameraService.isRunning 
+                              _isPeriodicCaptureActive 
                                   ? Icons.fiber_manual_record 
                                   : Icons.pause_circle,
-                              color: _cameraService.isRunning ? Colors.red : Colors.orange,
+                              color: _isPeriodicCaptureActive ? Colors.red : Colors.orange,
                               size: 12,
                             ),
                             const SizedBox(width: 4),
                             Text(
-                              _cameraService.isRunning ? 'AUTO-CAPTURE' : 'PAUSED',
+                              _isPeriodicCaptureActive ? 'AUTO-CAPTURE' : 'PAUSED',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 10,
@@ -890,68 +958,67 @@ void initState() {
     );
   }
 
-      Widget _buildSessionControl() {
-  return Card(
-    margin: const EdgeInsets.symmetric(horizontal: 16),
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Text(
-            'Class Session Control',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 16),
-          if (!_isSessionActive)
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _isCameraReady && _isServerHealthy && !_isLoading
-                    ? _startAttendanceSession
-                    : null,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('🎯 Start Class & Begin Tracking'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-              ),
-            )
-          else
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isLoading ? null : _captureManualSnapshot,
-                    icon: const Icon(Icons.camera_alt),
-                    label: const Text('📸 Manual Snapshot'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isLoading ? null : _endAttendanceSession,
-                    icon: const Icon(Icons.stop),
-                    label: const Text('🏁 End Class'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                ),
-              ],
+  Widget _buildSessionControl() {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Text(
+              'Class Session Control',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-        ],
+            const SizedBox(height: 16),
+            if (!_isSessionActive)
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _isCameraReady && _isServerHealthy && !_isLoading
+                      ? _startAttendanceSession
+                      : null,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('🎯 Start Class & Begin Tracking'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                ),
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isLoading ? null : _captureManualSnapshot,
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text('📸 Manual Snapshot'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isLoading ? null : _endAttendanceSession,
+                      icon: const Icon(Icons.stop),
+                      label: const Text('🏁 End Class'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
       ),
-    ),
-  );
-}
-
+    );
+  }
 
   Widget _buildSessionStatus() {
     if (_currentSession == null) return const SizedBox();
@@ -959,7 +1026,6 @@ void initState() {
     final session = _currentSession!;
     final now = DateTime.now();
     final timeRemaining = session.endTime.difference(now);
-    final captureStats = _cameraStats;
 
     return Card(
       margin: const EdgeInsets.all(16),
@@ -1129,7 +1195,7 @@ void initState() {
                 const SizedBox(width: 8),
                 IconButton(
                   icon: const Icon(Icons.refresh, size: 20),
-                  onPressed: _loadAttendanceRecords,
+                  onPressed: _loadSessionRecords,
                   tooltip: 'Refresh records',
                 ),
               ],
@@ -1162,17 +1228,17 @@ void initState() {
                       final record = _attendanceRecords[index];
                       return ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: record.isPresent 
+                          backgroundColor: record.status == 'present' 
                               ? Colors.green.shade100 
-                              : record.isLate 
+                              : record.status == 'late' 
                                   ? Colors.orange.shade100 
                                   : Colors.red.shade100,
                           child: Icon(
-                            record.isPresent ? Icons.check : 
-                            record.isLate ? Icons.access_time : Icons.close,
-                            color: record.isPresent 
+                            record.status == 'present' ? Icons.check : 
+                            record.status == 'late' ? Icons.access_time : Icons.close,
+                            color: record.status == 'present' 
                                 ? Colors.green 
-                                : record.isLate 
+                                : record.status == 'late' 
                                     ? Colors.orange 
                                     : Colors.red,
                           ),
@@ -1180,11 +1246,11 @@ void initState() {
                         title: Row(
                           children: [
                             Text(
-                              record.studentId,
+                              record.studentId ?? 'Unknown',
                               style: const TextStyle(fontWeight: FontWeight.w600),
                             ),
                             const SizedBox(width: 8),
-                            if (record.hasFaceMatch)
+                            if (record.faceMatchScore != null && record.faceMatchScore! > 0)
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                 decoration: BoxDecoration(
@@ -1212,10 +1278,10 @@ void initState() {
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('${record.timeOnly} - ${record.statusInThai}'),
-                            if (record.hasFaceMatch)
+                            Text('${record.checkInTime.toLocal().toString().split(' ')[1].substring(0, 5)} - ${record.status.toUpperCase()}'),
+                            if (record.faceMatchScore != null && record.faceMatchScore! > 0)
                               Text(
-                                'Auto-detected (${record.faceMatchPercentage.toStringAsFixed(1)}% match)',
+                                'Auto-detected (${(record.faceMatchScore! * 100).toStringAsFixed(1)}% match)',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.blue.shade600,
@@ -1226,15 +1292,15 @@ void initState() {
                         trailing: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: record.isPresent 
+                            color: record.status == 'present' 
                                 ? Colors.green 
-                                : record.isLate 
+                                : record.status == 'late' 
                                     ? Colors.orange 
                                     : Colors.red,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Text(
-                            record.statusDisplayText,
+                            record.status.toUpperCase(),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 10,
@@ -1423,5 +1489,4 @@ void initState() {
       ),
     );
   }
-} 
-                      
+}

@@ -6,7 +6,7 @@ import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/services/unified_attendance_service.dart';
 import 'package:myproject2/data/services/unified_camera_service.dart';
-
+import 'package:myproject2/core/service_locator.dart'; // เพิ่ม import
 
 class TeacherAttendanceManagementScreen extends StatefulWidget {
   final String classId;
@@ -23,8 +23,9 @@ class TeacherAttendanceManagementScreen extends StatefulWidget {
 }
 
 class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceManagementScreen> {
-  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
-  final UnifiedCameraService  _cameraService = UnifiedCameraService ();
+  // ใช้ service locator แทนการสร้าง instance ใหม่
+  late final UnifiedAttendanceService _attendanceService;
+  late final UnifiedCameraService _cameraService;
   
   AttendanceSessionModel? _currentSession;
   List<AttendanceRecordModel> _attendanceRecords = [];
@@ -33,6 +34,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
   bool _isLoading = false;
   bool _isSessionActive = false;
   bool _isCameraReady = false;
+  bool _isPeriodicCaptureActive = false;
   
   // Session configuration
   int _sessionDurationHours = 2;
@@ -42,23 +44,42 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
-    _loadCurrentSession();
+    _initializeServices();
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
-    _cameraService.dispose();
+    _stopPeriodicCapture();
+    _clearCallbacks();
     super.dispose();
+  }
+
+  void _initializeServices() {
+    // ใช้ service locator
+    _attendanceService = serviceLocator<UnifiedAttendanceService>();
+    _cameraService = serviceLocator<UnifiedCameraService>();
+    
+    _initializeCamera();
+    _loadCurrentSession();
+  }
+
+  void _clearCallbacks() {
+    _cameraService.onImageCaptured = null;
+    _cameraService.onError = null;
+    _cameraService.onStateChanged = null;
   }
 
   Future<void> _initializeCamera() async {
     try {
-      // Setup camera callbacks
-      _cameraService.onImageCaptured = _handlePeriodicImage;
+      // Setup camera callbacks (แก้ไข callback names)
+      _cameraService.onImageCaptured = (imagePath, captureTime) {
+        _handlePeriodicImage(imagePath, captureTime);
+      };
       _cameraService.onError = _handleCameraError;
-      _cameraService.onStatusChanged = _handleCameraStatusChanged;
+      _cameraService.onStateChanged = (state) {
+        _handleCameraStatusChanged(state == CameraState.ready);
+      };
       
       final initialized = await _cameraService.initialize();
       
@@ -80,38 +101,50 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     }
   }
 
-  Future<void> _loadSessionRecords() async {
-  if (_currentSession == null) return;
-  
-  try {
-    // ใช้ getSessionRecords แทน getAttendanceRecords
-    final records = await _attendanceService.getSessionRecords(_currentSession!.id);
-    
-    if (mounted) {
-      setState(() {
-        _attendanceRecords = records;
-      });
-    }
-    
-  } catch (e) {
-    print('❌ Error loading session records: $e');
-    if (mounted) {
-      _showSnackBar('ไม่สามารถโหลดข้อมูลการเข้าเรียนได้: $e', Colors.red);
+  Future<void> _loadCurrentSession() async {
+    try {
+      // แก้ไขจาก getActiveSessionForClass เป็น getActiveSession
+      final session = await _attendanceService.getActiveSession(widget.classId);
+      
+      if (mounted) {
+        setState(() {
+          _currentSession = session;
+          _isSessionActive = session?.isActive ?? false;
+        });
+
+        if (session != null) {
+          await _loadSessionRecords();
+          _startAutoRefresh();
+          
+          // If session is active and camera is ready, start capture
+          if (_isSessionActive && _isCameraReady) {
+            await _resumePeriodicCapture();
+          }
+        }
+      }
+    } catch (e) {
+      print('❌ Error loading current session: $e');
     }
   }
-}
 
-  Future<void> _loadAttendanceRecords() async {
+  Future<void> _loadSessionRecords() async {
     if (_currentSession == null) return;
-
+    
     try {
+      // แก้ไขจาก getAttendanceRecords เป็น getSessionRecords
       final records = await _attendanceService.getSessionRecords(_currentSession!.id);
       
       if (mounted) {
-        setState(() => _attendanceRecords = records);
+        setState(() {
+          _attendanceRecords = records;
+        });
       }
+      
     } catch (e) {
-      print('Error loading attendance records: $e');
+      print('❌ Error loading session records: $e');
+      if (mounted) {
+        _showSnackBar('ไม่สามารถโหลดข้อมูลการเข้าเรียนได้: $e', Colors.red);
+      }
     }
   }
 
@@ -119,13 +152,12 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
       if (_isSessionActive) {
-        _loadAttendanceRecords();
+        _loadSessionRecords(); // แก้ไขจาก _loadAttendanceRecords
       } else {
         timer.cancel();
       }
     });
   }
-
 
   // ========== Session Management ==========
   
@@ -138,7 +170,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     setState(() => _isLoading = true);
 
     try {
-      // Create new attendance session
+      // Create new attendance session (แก้ไขจาก createAttendanceSession เป็น createSession)
       final session = await _attendanceService.createSession(
         classId: widget.classId,
         durationHours: _sessionDurationHours,
@@ -153,7 +185,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
         });
 
         _startAutoRefresh();
-        startPeriodicCapture();
+        await _startPeriodicCapture(); // แก้ไข method call
         
         _showSnackBar('เริ่มคาบเรียนและการเช็คชื่ออัตโนมัติแล้ว', Colors.green);
       }
@@ -187,8 +219,8 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
       // Take final attendance snapshot
       await _captureFinalAttendance();
       
-      // End session in database
-      await _attendanceService.endSession (_currentSession!.id);
+      // End session in database (แก้ไขจาก endAttendanceSession เป็น endSession)
+      await _attendanceService.endSession(_currentSession!.id);
       
       if (mounted) {
         setState(() {
@@ -212,21 +244,57 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
 
   // ========== Camera Management ==========
   
-  Future<void> startPeriodicCapture({
-  required String sessionId,
-  Duration interval = const Duration(minutes: 5),
-  required Function(String imagePath, DateTime captureTime) onCapture,
-}) async {}
+  Future<void> _startPeriodicCapture() async {
+    if (_currentSession == null || !_isCameraReady) return;
+
+    try {
+      // แก้ไข method call ให้ตรงกับ UnifiedCameraService
+      await _cameraService.startPeriodicCapture(
+        sessionId: _currentSession!.id,
+        interval: Duration(minutes: _captureIntervalMinutes),
+        onCapture: (imagePath, captureTime) async {
+          await _handlePeriodicCapture(imagePath, captureTime);
+        },
+      );
+      
+      setState(() {
+        _isPeriodicCaptureActive = true;
+      });
+      
+      print('📸 Periodic capture started - every $_captureIntervalMinutes minutes');
+    } catch (e) {
+      print('❌ Failed to start periodic capture: $e');
+      _showSnackBar('ไม่สามารถเริ่มการเช็คชื่ออัตโนมัติได้: $e', Colors.red);
+    }
+  }
+
+  Future<void> _resumePeriodicCapture() async {
+    if (_currentSession == null || !_isSessionActive) return;
+
+    try {
+      if (!_cameraService.isCapturing) { // แก้ไขจาก isRunning
+        await _startPeriodicCapture();
+        print('📸 Resumed periodic capture for existing session');
+      }
+    } catch (e) {
+      print('⚠️ Error resuming capture: $e');
+    }
+  }
 
   void _stopPeriodicCapture() {
     _cameraService.stopPeriodicCapture();
+    
+    setState(() {
+      _isPeriodicCaptureActive = false;
+    });
+    
     print('⏹️ Stopped periodic capture');
   }
 
   Future<void> _captureFinalAttendance() async {
     try {
       print('📸 Taking final attendance snapshot...');
-      final imagePath = await _cameraService.captureImage();
+      final imagePath = await _cameraService.captureImage(); // แก้ไขจาก captureSingleImage
       
       if (imagePath != null) {
         await _processAttendanceImage(imagePath, isFinalCapture: true);
@@ -239,9 +307,18 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
 
   // ========== Camera Event Handlers ==========
   
-  void _handlePeriodicImage(String imagePath) {
-    print('📷 Periodic image captured: $imagePath');
+  void _handlePeriodicImage(String imagePath, DateTime captureTime) {
+    print('📷 Periodic image captured: $imagePath at $captureTime');
     _processAttendanceImage(imagePath);
+  }
+
+  Future<void> _handlePeriodicCapture(String imagePath, DateTime captureTime) async {
+    try {
+      print('📷 Processing periodic capture: ${imagePath.split('/').last}');
+      await _processAttendanceImage(imagePath, captureTime: captureTime);
+    } catch (e) {
+      print('❌ Error in periodic capture handler: $e');
+    }
   }
 
   void _handleCameraError(String error) {
@@ -251,27 +328,57 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     }
   }
 
-  void _handleCameraStatusChanged(bool isActive) {
-    print('📸 Camera status changed: $isActive');
+  void _handleCameraStatusChanged(bool isReady) {
+    print('📸 Camera status changed: $isReady');
     if (mounted) {
+      setState(() {
+        _isCameraReady = isReady;
+      });
+      
       _showSnackBar(
-        isActive ? 'เริ่มการเช็คชื่ออัตโนมัติ' : 'หยุดการเช็คชื่ออัตโนมัติ',
-        isActive ? Colors.green : Colors.orange,
+        isReady ? 'กล้องพร้อมใช้งาน' : 'กล้องไม่พร้อมใช้งาน',
+        isReady ? Colors.green : Colors.orange,
       );
     }
   }
 
-  Future<void> _processAttendanceImage(String imagePath, {bool isFinalCapture = false}) async {
+  Future<void> _processAttendanceImage(String imagePath, {bool isFinalCapture = false, DateTime? captureTime}) async {
     try {
-      // TODO: Send image to FastAPI for face recognition processing
-      // This will be implemented with the new FastAPI endpoints
-      
+      if (_currentSession == null) {
+        print('⚠️ No active session for processing image');
+        return;
+      }
+
       print('🔄 Processing attendance image: $imagePath');
-      print('   Session ID: ${_currentSession?.id}');
+      print('   Session ID: ${_currentSession!.id}');
       print('   Is final capture: $isFinalCapture');
       
-      // For now, just reload attendance records
-      await _loadAttendanceRecords();
+      // ส่งรูปไป process ด้วย UnifiedAttendanceService
+      final result = await _attendanceService.processPeriodicCapture(
+        imagePath: imagePath,
+        sessionId: _currentSession!.id,
+        captureTime: captureTime ?? DateTime.now(),
+        deleteImageAfter: true,
+      );
+
+      if (result['success']) {
+        final data = result['data'];
+        final facesDetected = data['faces_detected'] as int? ?? 0;
+        final newRecords = data['new_attendance_records'] as int? ?? 0;
+        
+        print('✅ Attendance processed successfully');
+        print('   Faces detected: $facesDetected');
+        print('   New records: $newRecords');
+        
+        if (facesDetected > 0) {
+          _showSnackBar('ตรวจพบใบหน้า $facesDetected คน, บันทึกการเข้าเรียน $newRecords คน', Colors.green);
+        }
+        
+        // Refresh attendance records
+        await _loadSessionRecords();
+      } else {
+        print('❌ Failed to process attendance: ${result['error']}');
+      }
       
     } catch (e) {
       print('❌ Error processing attendance image: $e');
@@ -324,7 +431,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            onPressed: _showSessionSettings,
+            onPressed: _isSessionActive ? null : _showSessionSettings, // ปิดการแก้ไขเมื่อ session กำลังทำงาน
             tooltip: 'ตั้งค่าการเช็คชื่อ',
           ),
         ],
@@ -350,7 +457,45 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
         child: _isCameraReady && _cameraService.controller != null
             ? ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: CameraPreview(_cameraService.controller!),
+                child: Stack(
+                  children: [
+                    CameraPreview(_cameraService.controller!),
+                    
+                    // Status overlay
+                    Positioned(
+                      top: 12,
+                      left: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.7),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _isPeriodicCaptureActive 
+                                  ? Icons.fiber_manual_record 
+                                  : Icons.pause_circle,
+                              color: _isPeriodicCaptureActive ? Colors.red : Colors.orange,
+                              size: 12,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _isPeriodicCaptureActive ? 'AUTO-CAPTURE' : 'PAUSED',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               )
             : Container(
                 decoration: BoxDecoration(
@@ -414,8 +559,9 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                   Expanded(
                     child: OutlinedButton.icon(
                       onPressed: _isLoading ? null : () async {
-                        final imagePath = await _cameraService.captureImage ();
+                        final imagePath = await _cameraService.captureImage(); // แก้ไขจาก captureSingleImage
                         if (imagePath != null) {
+                          await _processAttendanceImage(imagePath);
                           _showSnackBar('ถ่ายรูปเช็คชื่อเพิ่มเติมแล้ว', Colors.blue);
                         }
                       },
@@ -449,7 +595,6 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
     final session = _currentSession!;
     final now = DateTime.now();
     final timeRemaining = session.endTime.difference(now);
-    final captureStatus = _cameraService.isRunning;
 
     return Card(
       margin: const EdgeInsets.all(16),
@@ -490,8 +635,8 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                 Expanded(
                   child: _buildInfoChip(
                     'การเช็คชื่ออัตโนมัติ',
-                    captureStatus ? 'เปิด' : 'ปิด',
-                    captureStatus ? Colors.green : Colors.orange,
+                    _isPeriodicCaptureActive ? 'เปิด' : 'ปิด', // แก้ไขจาก captureStatus
+                    _isPeriodicCaptureActive ? Colors.green : Colors.orange,
                   ),
                 ),
               ],
@@ -580,7 +725,20 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
           Expanded(
             child: _attendanceRecords.isEmpty
                 ? const Center(
-                    child: Text('ยังไม่มีการเช็คชื่อ'),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.people_outline, size: 64, color: Colors.grey),
+                        SizedBox(height: 16),
+                        Text('ยังไม่มีการเช็คชื่อ'),
+                        SizedBox(height: 8),
+                        Text(
+                          'รายการจะแสดงเมื่อมีการตรวจพบใบหน้าอัตโนมัติ',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
                   )
                 : ListView.builder(
                     itemCount: _attendanceRecords.length,
@@ -588,26 +746,26 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                       final record = _attendanceRecords[index];
                       return ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: record.isPresent 
+                          backgroundColor: record.status == 'present' 
                               ? Colors.green.shade100 
-                              : record.isLate 
+                              : record.status == 'late' 
                                   ? Colors.orange.shade100 
                                   : Colors.red.shade100,
                           child: Icon(
-                            record.isPresent ? Icons.check : 
-                            record.isLate ? Icons.access_time : Icons.close,
-                            color: record.isPresent 
+                            record.status == 'present' ? Icons.check : 
+                            record.status == 'late' ? Icons.access_time : Icons.close,
+                            color: record.status == 'present' 
                                 ? Colors.green 
-                                : record.isLate 
+                                : record.status == 'late' 
                                     ? Colors.orange 
                                     : Colors.red,
                           ),
                         ),
-                        title: Text(record.studentId),
+                        title: Text(record.studentId ?? 'Unknown Student'),
                         subtitle: Text(
-                          '${record.timeOnly} - ${record.statusInThai}',
+                          '${record.checkInTime.toLocal().toString().split(' ')[1].substring(0, 5)} - ${record.status.toUpperCase()}',
                         ),
-                        trailing: record.hasFaceMatch 
+                        trailing: (record.faceMatchScore != null && record.faceMatchScore! > 0)
                             ? Icon(Icons.verified_user, color: Colors.blue.shade600)
                             : null,
                       );
@@ -628,15 +786,35 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info, color: Colors.blue),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'การตั้งค่าจะใช้กับการเริ่มคาบเรียนครั้งถัดไป',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
               ListTile(
                 title: const Text('ระยะเวลาคาบเรียน'),
                 subtitle: Text('$_sessionDurationHours ชั่วโมง'),
                 trailing: DropdownButton<int>(
                   value: _sessionDurationHours,
-                  items: [1, 2, 3, 4].map((hours) => 
+                  items: [1, 2, 3, 4, 6, 8].map((hours) => 
                     DropdownMenuItem(value: hours, child: Text('$hours ชั่วโมง'))
                   ).toList(),
-                  onChanged: (value) {
+                  onChanged: _isSessionActive ? null : (value) {
                     if (value != null) {
                       setState(() => _sessionDurationHours = value);
                     }
@@ -648,10 +826,10 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                 subtitle: Text('ทุก $_captureIntervalMinutes นาที'),
                 trailing: DropdownButton<int>(
                   value: _captureIntervalMinutes,
-                  items: [3, 5, 10, 15].map((minutes) => 
+                  items: [3, 5, 10, 15, 20].map((minutes) => 
                     DropdownMenuItem(value: minutes, child: Text('$minutes นาที'))
                   ).toList(),
-                  onChanged: (value) {
+                  onChanged: _isSessionActive ? null : (value) {
                     if (value != null) {
                       setState(() => _captureIntervalMinutes = value);
                     }
@@ -666,7 +844,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
                   items: [15, 30, 45, 60].map((minutes) => 
                     DropdownMenuItem(value: minutes, child: Text('$minutes นาที'))
                   ).toList(),
-                  onChanged: (value) {
+                  onChanged: _isSessionActive ? null : (value) {
                     if (value != null) {
                       setState(() => _onTimeLimitMinutes = value);
                     }
