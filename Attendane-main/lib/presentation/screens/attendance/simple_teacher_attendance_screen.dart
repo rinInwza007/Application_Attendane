@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
-import 'package:myproject2/data/models/webcam_config_model.dart'; // เพิ่ม import
+import 'package:myproject2/data/models/webcam_config_model.dart';
+import 'package:myproject2/data/services/unified_attendance_service.dart'; // แก้ไข import
+import 'package:myproject2/core/service_locator.dart'; // เพิ่ม import
 
 class SimpleTeacherAttendanceScreen extends StatefulWidget {
   final String classId;
@@ -20,7 +22,8 @@ class SimpleTeacherAttendanceScreen extends StatefulWidget {
 }
 
 class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceScreen> {
-  final SimpleAttendanceService _attendanceService = SimpleAttendanceService();
+  // ใช้ service locator แทนการสร้าง instance ใหม่
+  late final UnifiedAttendanceService _attendanceService;
   
   AttendanceSessionModel? _currentSession;
   List<AttendanceRecordModel> _attendanceRecords = [];
@@ -29,7 +32,6 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
   bool _isLoading = false;
   bool _isCreatingSession = false;
   
-  // เพิ่มตัวแปร webcam config ที่หายไป
   WebcamConfigModel? _webcamConfig;
 
   // Form controllers for creating session
@@ -39,6 +41,7 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
   @override
   void initState() {
     super.initState();
+    _attendanceService = serviceLocator<UnifiedAttendanceService>(); // ใช้ service locator
     _loadActiveSession();
   }
 
@@ -54,7 +57,8 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
     setState(() => _isLoading = true);
     
     try {
-      final session = await _attendanceService.getActiveSessionForClass(widget.classId);
+      // แก้ไขจาก getActiveSessionForClass เป็น getActiveSession
+      final session = await _attendanceService.getActiveSession(widget.classId);
       
       if (mounted) {
         setState(() {
@@ -79,7 +83,8 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
     if (_currentSession == null) return;
 
     try {
-      final records = await _attendanceService.getAttendanceRecords(_currentSession!.id);
+      // แก้ไขจาก getAttendanceRecords เป็น getSessionRecords
+      final records = await _attendanceService.getSessionRecords(_currentSession!.id);
       
       if (mounted) {
         setState(() => _attendanceRecords = records);
@@ -109,7 +114,8 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
       final durationHours = int.parse(_durationController.text);
       final onTimeLimitMinutes = int.parse(_onTimeLimitController.text);
 
-      final session = await _attendanceService.createAttendanceSession(
+      // แก้ไขจาก createAttendanceSession เป็น createSession
+      final session = await _attendanceService.createSession(
         classId: widget.classId,
         durationHours: durationHours,
         onTimeLimitMinutes: onTimeLimitMinutes,
@@ -163,7 +169,8 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
     setState(() => _isLoading = true);
 
     try {
-      await _attendanceService.endAttendanceSession(_currentSession!.id);
+      // แก้ไขจาก endAttendanceSession เป็น endSession
+      await _attendanceService.endSession(_currentSession!.id);
       
       if (mounted) {
         setState(() {
@@ -191,7 +198,7 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
           ipAddress: '192.168.1.100',
           port: 8080,
         ),
-        attendanceService: _attendanceService,
+        attendanceService: _attendanceService, // ส่ง UnifiedAttendanceService
       ),
     );
 
@@ -434,7 +441,7 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
 
     final session = _currentSession!;
     final timeRemaining = session.endTime.difference(DateTime.now());
-    final onTimeDeadline = session.onTimeDeadline;
+    final onTimeDeadline = session.startTime.add(Duration(minutes: session.onTimeLimitMinutes));
     final isOnTimePeriod = DateTime.now().isBefore(onTimeDeadline);
 
     return Column(
@@ -630,11 +637,11 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
         backgroundColor: statusColor.withOpacity(0.1),
         child: Icon(statusIcon, color: statusColor),
       ),
-      title: Text(record.studentId),
+      title: Text(record.studentId ?? 'Unknown Student'),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(record.studentEmail),
+          Text(record.studentEmail ?? 'No email'),
           Text(
             'Checked in: ${_formatTime(record.checkInTime)}',
             style: const TextStyle(fontSize: 12),
@@ -667,7 +674,7 @@ class _SimpleTeacherAttendanceScreenState extends State<SimpleTeacherAttendanceS
 // Simple Webcam Configuration Dialog
 class _SimpleWebcamConfigDialog extends StatefulWidget {
   final WebcamConfigModel initialConfig;
-  final SimpleAttendanceService attendanceService;
+  final UnifiedAttendanceService attendanceService; // แก้ไข type
 
   const _SimpleWebcamConfigDialog({
     required this.initialConfig,
