@@ -4,6 +4,8 @@ import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/presentation/screens/settings/setting.dart';
 import 'package:myproject2/presentation/screens/attendance/updated_student_attendance_screen.dart';
 import 'package:myproject2/presentation/screens/face/realtime_face_detection_screen.dart';
+import 'package:myproject2/presentation/screens/face/multi_step_face_capture_screen.dart';
+
 
 class UpdatedProfile extends StatefulWidget {
   const UpdatedProfile({super.key});
@@ -70,30 +72,31 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Row(
-          children: [
-            Icon(Icons.face_retouching_natural, color: Colors.blue),
-            SizedBox(width: 12),
-            Text('Setup Face Recognition'),
-          ],
-        ),
+  children: [
+    Icon(Icons.face_6, color: Colors.blue), // เปลี่ยนจาก Icons.face_retouching_natural
+    SizedBox(width: 12),
+    Text('Setup Multi-Step Face Recognition'), // เปลี่ยนข้อความ
+  ],
+),
         content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Face Recognition จะช่วยให้การเช็คชื่อสะดวกและปลอดภัยมากขึ้น',
-              style: TextStyle(fontWeight: FontWeight.w500),
-            ),
-            SizedBox(height: 12),
-            Text('คุณสมบัติ:'),
-            SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.check, size: 16, color: Colors.green),
-                SizedBox(width: 8),
-                Expanded(child: Text('เช็คชื่อแบบ Real-time ไม่ต้องถ่ายรูป')),
-              ],
-            ),
+  mainAxisSize: MainAxisSize.min,
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+    Text(
+      'Advanced Multi-Step Face Recognition จะช่วยให้การเช็คชื่อปลอดภัยและแม่นยำมากขึ้น',
+      style: TextStyle(fontWeight: FontWeight.w500),
+    ),
+    SizedBox(height: 12),
+    Text('คุณสมบัติพิเศษ:'), // เปลี่ยนข้อความ
+    SizedBox(height: 8),
+    // เพิ่มคำอธิบายใหม่
+    Row(
+      children: [
+        Icon(Icons.check, size: 16, color: Colors.green),
+        SizedBox(width: 8),
+        Expanded(child: Text('ถ่ายภาพใบหน้า 6 ท่าทาง (หน้าตรง, ซ้าย, ขวา, เงย, ก้ม, ยิ้ม)')),
+      ],
+    ),
             SizedBox(height: 4),
             Row(
               children: [
@@ -137,55 +140,65 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
 
   // เปิดหน้าจอลงทะเบียนใบหน้าแบบ Real-time
   Future<void> _openFaceRegistration() async {
+  if (!mounted) return;
+  
+  setState(() => _isLoading = true);
+  
+  try {
+    debugPrint('📱 Opening multi-step face registration...');
+    
+    // เปลี่ยนชื่อตัวแปร
+    final currentUserEmail = _authService.getCurrentUserEmail();
+    
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => MultiStepFaceCaptureScreen(
+          studentId: currentUserEmail?.split('@').first ?? 'unknown',
+          studentEmail: currentUserEmail, // ใช้ชื่อใหม่
+          isUpdate: true,
+          onAllImagesCapture: (imagePaths) async {
+            debugPrint('✅ All face images captured: ${imagePaths.length} images');
+            
+            try {
+              debugPrint('🔄 Processing multi-step face images...');
+            } catch (e) {
+              debugPrint('❌ Error processing multi-step face images: $e');
+              throw e;
+            }
+          },
+        ),
+      ),
+    );
+
     if (!mounted) return;
-    
-    setState(() => _isLoading = true);
-    
-    try {
-      print('📱 Opening real-time face registration...');
-      
-      final result = await Navigator.push<bool>(
-        context,
-        MaterialPageRoute(
-          builder: (context) => RealtimeFaceDetectionScreen(
-            isRegistration: true,
-            instructionText: "วางใบหน้าของคุณในกรอบสีเขียว\nระบบจะตรวจจับและบันทึกใบหน้าโดยอัตโนมัติ",
-            onFaceEmbeddingCaptured: (embedding) {
-              print('✅ Face embedding captured successfully');
-            },
+
+    if (result == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.white),
+              SizedBox(width: 12),
+              Text('ตั้งค่า Face Recognition สำเร็จ!'),
+            ],
           ),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 3),
         ),
       );
-
-      if (!mounted) return;
-
-      if (result == true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.white),
-                SizedBox(width: 12),
-                Text('ตั้งค่า Face Recognition สำเร็จ!'),
-              ],
-            ),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 3),
-          ),
-        );
-      }
-
-    } catch (e) {
-      print('❌ Error in face registration: $e');
-      if (mounted) {
-        _showErrorSnackBar('เกิดข้อผิดพลาดในการตั้งค่า Face Recognition: ${e.toString()}');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+    }
+  } catch (e) {
+    debugPrint('❌ Error in multi-step face registration: $e');
+    if (mounted) {
+      _showErrorSnackBar('เกิดข้อผิดพลาดในการตั้งค่า Multi-Step Face Recognition: ${e.toString()}');
+    }
+  } finally {
+    if (mounted) {
+      setState(() => _isLoading = false);
     }
   }
+}
 
   // จัดการ Face Recognition ที่มีอยู่แล้ว
   Future<void> _manageFaceRecognition() async {
@@ -323,11 +336,18 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
         await _authService.deactivateFaceEmbedding();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('ลบข้อมูล Face Recognition สำเร็จ'),
-              backgroundColor: Colors.green,
-            ),
-          );
+  const SnackBar(
+    content: Row(
+      children: [
+        Icon(Icons.check_circle, color: Colors.white),
+        SizedBox(width: 12),
+        Text('ตั้งค่า Multi-Step Face Recognition สำเร็จ!'), // เปลี่ยนข้อความ
+      ],
+    ),
+    backgroundColor: Colors.green,
+    duration: Duration(seconds: 3),
+  ),
+);
           setState(() {}); // Refresh UI
         }
       } catch (e) {
@@ -646,10 +666,10 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
         actions: [
           // ปุ่มจัดการ Face Recognition
           IconButton(
-            icon: const Icon(Icons.face_retouching_natural),
-            onPressed: _manageFaceRecognition,
-            tooltip: 'Manage Face Recognition',
-          ),
+    icon: const Icon(Icons.face_6), // เปลี่ยนจาก Icons.face_retouching_natural
+    onPressed: _manageFaceRecognition,
+    tooltip: 'Manage Multi-Step Face Recognition', // เปลี่ยน tooltip
+  ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.push(
@@ -781,13 +801,13 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: IconButton(
-                        icon: Icon(
-                          Icons.face_retouching_natural,
-                          color: Colors.green.shade700,
-                        ),
-                        onPressed: () => _goToAttendance(classData),
-                        tooltip: 'Face Recognition Check-in',
-                      ),
+  icon: Icon(
+    Icons.face_6, // เปลี่ยนจาก Icons.face_retouching_natural
+    color: Colors.green.shade700,
+  ),
+  onPressed: () => _goToAttendance(classData),
+  tooltip: 'Multi-Step Face Recognition Check-in', // เปลี่ยน tooltip
+),
                     ),
                     const SizedBox(width: 8),
                     IconButton(
@@ -920,19 +940,18 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      hasFace ? Icons.verified_user : Icons.face_retouching_off,
-                      size: 18,
-                      color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      hasFace ? 'Face ID Ready' : 'Setup Face ID',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
-                      ),
-                    ),
+  hasFace ? Icons.verified_user : Icons.face_6, // เปลี่ยนจาก Icons.face_retouching_off
+  size: 18,
+  color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
+),
+Text(
+  hasFace ? 'Multi-Step Ready' : 'Setup Face ID', // เปลี่ยนข้อความ
+  style: TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w600,
+    color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
+  ),
+),
                   ],
                 ),
               );

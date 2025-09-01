@@ -2,9 +2,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:myproject2/data/services/auth_service.dart';
-import 'package:myproject2/presentation/screens/face/realtime_face_detection_screen.dart';
+import 'package:myproject2/presentation/screens/face/multi_step_face_capture_screen.dart'; // เปลี่ยนเป็น MultiStepFaceCaptureScreen
 import 'package:myproject2/presentation/screens/profile/profileteachaer.dart';
-import 'package:myproject2/presentation/screens/profile/updated_profile.dart';
+import 'package:myproject2/presentation/screens/profile/updated_profile.dart' hide Text;
 
 class InputDataPage extends StatefulWidget {
   const InputDataPage({super.key});
@@ -87,16 +87,28 @@ class _InputDataPageState extends State<InputDataPage> {
     setState(() => _isLoading = true);
     
     try {
-      print('📱 Opening mandatory face recognition setup...');
+      print('📱 Opening multi-step face capture setup...');
       
+      // ใช้ MultiStepFaceCaptureScreen แทน RealtimeFaceDetectionScreen
       final result = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
-          builder: (context) => RealtimeFaceDetectionScreen(
-            isRegistration: true,
-            instructionText: "วางใบหน้าของคุณในกรอบสีเขียว\nเพื่อตั้งค่า Face Recognition (จำเป็นสำหรับนักเรียน)",
-            onFaceEmbeddingCaptured: (embedding) {
-              print('✅ Face embedding captured successfully');
+          builder: (context) => MultiStepFaceCaptureScreen(
+            studentId: _schoolIdController.text.trim(),
+            studentEmail: _authService.getCurrentUserEmail(),
+            isUpdate: false,
+            onAllImagesCapture: (imagePaths) async {
+              print('✅ All face images captured: ${imagePaths.length} images');
+              
+              // Process และบันทึกข้อมูลใบหน้าที่นี่
+              try {
+                // สามารถเพิ่มการประมวลผล face embedding ได้ที่นี่
+                print('🔄 Processing face images...');
+                // await _processFaceImages(imagePaths);
+              } catch (e) {
+                print('❌ Error processing face images: $e');
+                throw e;
+              }
             },
           ),
         ),
@@ -140,7 +152,7 @@ class _InputDataPageState extends State<InputDataPage> {
             ),
             SizedBox(height: 12),
             Text(
-              'This ensures:',
+              'Multi-step face capture ensures:',
               style: TextStyle(fontWeight: FontWeight.w500),
             ),
             SizedBox(height: 8),
@@ -149,7 +161,7 @@ class _InputDataPageState extends State<InputDataPage> {
               children: [
                 Icon(Icons.security, size: 16, color: Colors.blue),
                 SizedBox(width: 8),
-                Expanded(child: Text('Secure attendance verification')),
+                Expanded(child: Text('Enhanced security with multiple angles')),
               ],
             ),
             SizedBox(height: 4),
@@ -158,7 +170,7 @@ class _InputDataPageState extends State<InputDataPage> {
               children: [
                 Icon(Icons.verified_user, size: 16, color: Colors.blue),
                 SizedBox(width: 8),
-                Expanded(child: Text('Prevention of attendance fraud')),
+                Expanded(child: Text('Better face recognition accuracy')),
               ],
             ),
             SizedBox(height: 4),
@@ -167,12 +179,12 @@ class _InputDataPageState extends State<InputDataPage> {
               children: [
                 Icon(Icons.speed, size: 16, color: Colors.blue),
                 SizedBox(width: 8),
-                Expanded(child: Text('Quick and easy check-in')),
+                Expanded(child: Text('Quick and reliable check-in')),
               ],
             ),
             SizedBox(height: 16),
             Text(
-              'Please try the face setup again.',
+              'Please complete the multi-step face setup.',
               style: TextStyle(
                 color: Colors.orange,
                 fontWeight: FontWeight.w500,
@@ -268,7 +280,7 @@ class _InputDataPageState extends State<InputDataPage> {
       case 'profile':
         return 'Complete Your Profile';
       case 'face_setup':
-        return 'Setup Face Recognition';
+        return 'Setup Multi-Step Face Recognition';
       case 'completing':
         return 'Almost Ready!';
       default:
@@ -378,7 +390,7 @@ class _InputDataPageState extends State<InputDataPage> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                'Face Recognition setup is required for all students',
+                                'Multi-step Face Recognition setup is required for all students',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.blue.shade700,
@@ -511,7 +523,7 @@ class _InputDataPageState extends State<InputDataPage> {
                   ],
                 ),
                 child: Icon(
-                  Icons.face_retouching_natural,
+                  Icons.face_6, // เปลี่ยนไอคอนให้เหมาะสมกับ multi-step
                   size: 80,
                   color: Colors.blue.shade400,
                 ),
@@ -522,7 +534,7 @@ class _InputDataPageState extends State<InputDataPage> {
         const SizedBox(height: 30),
         
         Text(
-          'Face Recognition Required',
+          'Multi-Step Face Recognition Required',
           style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                 fontWeight: FontWeight.bold,
                 color: Colors.blue.shade700,
@@ -530,7 +542,7 @@ class _InputDataPageState extends State<InputDataPage> {
         ),
         const SizedBox(height: 8),
         Text(
-          'This step is mandatory for all students\nto ensure secure attendance',
+          'Advanced face capture with multiple angles\nfor enhanced security and accuracy',
           style: TextStyle(
             fontSize: 16,
             color: Colors.grey.shade600,
@@ -556,7 +568,7 @@ class _InputDataPageState extends State<InputDataPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Security Requirement',
+                      'Enhanced Security Requirement',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
@@ -565,7 +577,7 @@ class _InputDataPageState extends State<InputDataPage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Face Recognition is mandatory for students to prevent attendance fraud and ensure system security.',
+                      'Multi-step Face Recognition captures your face from different angles to ensure maximum security and prevent fraud.',
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.red.shade600,
@@ -595,7 +607,7 @@ class _InputDataPageState extends State<InputDataPage> {
                   Icon(Icons.verified_user, color: Colors.blue.shade600, size: 20),
                   const SizedBox(width: 8),
                   Text(
-                    'Why Face Recognition?',
+                    'Why Multi-Step Face Recognition?',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
@@ -606,10 +618,10 @@ class _InputDataPageState extends State<InputDataPage> {
               ),
               const SizedBox(height: 16),
               ...[
-                'Secure identity verification',
-                'Instant attendance check-in',
-                'Anti-spoofing protection',
-                'Automated attendance tracking',
+                'Capture 6 different face angles (front, left, right, up, down, smile)',
+                '360° face verification for enhanced security',
+                'Anti-spoofing protection with multiple poses',
+                'Improved recognition accuracy in various conditions',
               ].map((benefit) => Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Row(
@@ -645,9 +657,9 @@ class _InputDataPageState extends State<InputDataPage> {
                       valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                     ),
                   )
-                : const Icon(Icons.face),
+                : const Icon(Icons.face_6),
             label: Text(
-              _isLoading ? 'Setting up...' : 'Setup Face Recognition',
+              _isLoading ? 'Setting up...' : 'Start Multi-Step Face Setup',
               style: const TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
@@ -667,7 +679,7 @@ class _InputDataPageState extends State<InputDataPage> {
         
         // Note: No skip option
         Text(
-          'This step is required to continue',
+          'Complete all 6 steps to continue',
           style: TextStyle(
             color: Colors.grey.shade600,
             fontSize: 14,
@@ -729,7 +741,7 @@ class _InputDataPageState extends State<InputDataPage> {
         
         Text(
           _selectedRole == 'student' 
-              ? 'Your account and Face Recognition\nare ready to use!'
+              ? 'Your account and Multi-Step Face Recognition\nare ready to use!'
               : 'Your teacher account is ready to use!',
           style: TextStyle(
             fontSize: 16,
@@ -753,7 +765,7 @@ class _InputDataPageState extends State<InputDataPage> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'Face Recognition setup complete!\nYou can now use quick check-in.',
+                    'Multi-Step Face Recognition setup complete!\nYou can now use secure face-based check-in.',
                     style: TextStyle(
                       fontSize: 14,
                       color: Colors.green.shade700,
@@ -876,7 +888,7 @@ class _InputDataPageState extends State<InputDataPage> {
                 const SizedBox(height: 4),
               if (role == 'student')
                 Text(
-                  '(Face ID Required)',
+                  '(Multi-Step Face ID)',
                   style: TextStyle(
                     color: isSelected ? Colors.blue.shade600 : Colors.grey.shade500,
                     fontSize: 10,

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:myproject2/presentation/screens/auth/register_screen.dart';
 import 'package:myproject2/presentation/screens/profile/inputdata.dart';
-import 'package:myproject2/presentation/screens/profile/updated_profile.dart'; // เปลี่ยนจาก profile.dart
+import 'package:myproject2/presentation/screens/profile/updated_profile.dart' hide Text; // เปลี่ยนจาก profile.dart
 import 'package:myproject2/presentation/screens/profile/profileteachaer.dart';
 import 'package:myproject2/data/services/auth_service.dart';
 import '../../common_widgets/app_button.dart';
