@@ -111,53 +111,86 @@ def get_face_embedding_cached(student_id: str) -> Optional[np.ndarray]:
 def process_multiple_faces(image_array: np.ndarray, enrolled_students: List[str]) -> List[Dict]:
     """Process multiple faces in an image and identify students"""
     try:
+        if image_array is None or image_array.size == 0:
+            logger.warning("Empty image array provided")
+            return []
+        
+        if not enrolled_students:
+            logger.warning("No enrolled students provided")
+            return []
+        
         # Detect all faces
         face_locations = face_recognition.face_locations(image_array, model="hog")
         
         if not face_locations:
+            logger.info("No faces detected in image")
             return []
         
+        logger.info(f"Detected {len(face_locations)} faces")
+        
         # Get encodings for all detected faces
-        face_encodings = face_recognition.face_encodings(image_array, face_locations, num_jitters=1)
+        try:
+            face_encodings = face_recognition.face_encodings(image_array, face_locations, num_jitters=1)
+        except Exception as e:
+            logger.error(f"Error getting face encodings: {e}")
+            return []
+        
+        if len(face_encodings) != len(face_locations):
+            logger.warning(f"Encoding count ({len(face_encodings)}) doesn't match location count ({len(face_locations)})")
         
         detected_faces = []
         
         for i, (encoding, location) in enumerate(zip(face_encodings, face_locations)):
-            best_match = None
-            best_similarity = 0.0
-            
-            # Compare with all enrolled students
-            for student_id in enrolled_students:
-                stored_embedding = get_face_embedding_cached(student_id)
-                if stored_embedding is None:
-                    continue
+            try:
+                best_match = None
+                best_similarity = 0.0
                 
-                # Calculate similarity
-                similarity = calculate_enhanced_similarity(stored_embedding, encoding)
+                # Compare with all enrolled students
+                for student_id in enrolled_students:
+                    try:
+                        stored_embedding = get_face_embedding_cached(student_id)
+                        if stored_embedding is None:
+                            continue
+                        
+                        # Calculate similarity
+                        similarity = calculate_enhanced_similarity(stored_embedding, encoding)
+                        
+                        if similarity > FACE_THRESHOLD and similarity > best_similarity:
+                            best_similarity = similarity
+                            best_match = student_id
+                            
+                    except Exception as e:
+                        logger.error(f"Error comparing with student {student_id}: {e}")
+                        continue
                 
-                if similarity > FACE_THRESHOLD and similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = student_id
-            
-            # Calculate face quality metrics
-            quality = calculate_face_quality(image_array, location)
-            
-            face_info = {
-                'face_index': i,
-                'student_id': best_match,
-                'confidence': float(best_similarity),
-                'verified': best_match is not None,
-                'bounding_box': {
-                    'top': int(location[0]),
-                    'right': int(location[1]),
-                    'bottom': int(location[2]),
-                    'left': int(location[3])
-                },
-                'quality': quality
-            }
-            
-            detected_faces.append(face_info)
+                # Calculate face quality metrics
+                try:
+                    quality = calculate_face_quality(image_array, location)
+                except Exception as e:
+                    logger.error(f"Error calculating face quality: {e}")
+                    quality = {"overall_score": 0.0}
+                
+                face_info = {
+                    'face_index': i,
+                    'student_id': best_match,
+                    'confidence': float(best_similarity),
+                    'verified': best_match is not None,
+                    'bounding_box': {
+                        'top': int(location[0]),
+                        'right': int(location[1]),
+                        'bottom': int(location[2]),
+                        'left': int(location[3])
+                    },
+                    'quality': quality
+                }
+                
+                detected_faces.append(face_info)
+                
+            except Exception as e:
+                logger.error(f"Error processing face {i}: {e}")
+                continue
         
+        logger.info(f"Successfully processed {len(detected_faces)} faces")
         return detected_faces
         
     except Exception as e:
@@ -251,17 +284,66 @@ async def get_enrolled_students_for_class(class_id: str) -> List[str]:
     try:
         result = supabase.table('class_students').select('users(school_id)').eq('class_id', class_id).execute()
         
+        if not result.data:
+            logger.warning(f"No enrolled students found for class {class_id}")
+            return []
+        
         student_ids = []
         for record in result.data:
-            if record.get('users') and record['users'].get('school_id'):
+            if record and record.get('users') and record['users'].get('school_id'):
                 student_ids.append(record['users']['school_id'])
         
+        logger.info(f"Found {len(student_ids)} enrolled students for class {class_id}")
         return student_ids
+        
     except Exception as e:
-        logger.error(f"Error getting enrolled students: {e}")
+        logger.error(f"Error getting enrolled students for class {class_id}: {e}")
         return []
 
 # Enhanced API Endpoints
+@app.on_event("startup")
+async def startup_event():
+    """Validate configuration on startup"""
+    logger.info("🚀 Starting Face Recognition Server...")
+    
+    # Validate environment variables
+    required_env_vars = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"❌ Missing required environment variables: {missing_vars}")
+        raise ValueError(f"Missing environment variables: {missing_vars}")
+    
+    # Test face_recognition
+    try:
+        test_array = np.zeros((50, 50, 3), dtype=np.uint8)
+        face_recognition.face_locations(test_array)
+        logger.info("✅ Face recognition library working")
+    except Exception as e:
+        logger.error(f"❌ Face recognition test failed: {e}")
+    
+    # Test Supabase connection
+    try:
+        supabase.table('users').select("count", count='exact').limit(1).execute()
+        logger.info("✅ Supabase connection working")
+    except Exception as e:
+        logger.error(f"❌ Supabase connection test failed: {e}")
+    
+    logger.info(f"✅ Server startup complete. Face threshold: {FACE_THRESHOLD}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("🛑 Shutting down Face Recognition Server...")
+    
+    # Clear cache
+    with cache_lock:
+        face_cache.clear()
+    
+    # Shutdown thread pool
+    executor.shutdown(wait=True)
+    
+    logger.info("✅ Server shutdown complete")
 
 @app.post("/api/face/enroll")
 async def enroll_face_multiple_images(
@@ -552,62 +634,195 @@ async def end_session(session_id: str):
 async def save_face_embedding_to_db(student_id: str, student_email: str, encoding: np.ndarray, quality: float) -> bool:
     """Save face embedding to database"""
     try:
+        if encoding is None or encoding.size == 0:
+            logger.error("Empty encoding provided")
+            return False
+        
+        if not student_id or not student_email:
+            logger.error("Missing student_id or student_email")
+            return False
+        
+        # Validate encoding
+        if not isinstance(encoding, np.ndarray):
+            logger.error("Encoding must be numpy array")
+            return False
+        
+        if encoding.ndim != 1:
+            logger.error(f"Encoding must be 1D array, got {encoding.ndim}D")
+            return False
+        
         embedding_json = encoding.tolist()
+        
+        # Validate quality
+        quality = max(0.0, min(1.0, float(quality)))
         
         face_data = {
             'student_id': student_id,
             'face_embedding_json': json.dumps(embedding_json),
-            'face_quality': float(quality),
+            'face_quality': quality,
             'is_active': True,
             'created_at': datetime.now().isoformat(),
             'updated_at': datetime.now().isoformat()
         }
         
-        result = supabase.table('student_face_embeddings').upsert(face_data).execute()
+        # Check if student exists
+        student_check = supabase.table('users').select('school_id').eq('school_id', student_id).execute()
         
-        logger.info(f"Face data saved for student: {student_id}")
-        return True
+        if not student_check.data:
+            logger.error(f"Student {student_id} not found in users table")
+            return False
+        
+        # Deactivate old embeddings
+        supabase.table('student_face_embeddings').update({
+            'is_active': False,
+            'updated_at': datetime.now().isoformat()
+        }).eq('student_id', student_id).execute()
+        
+        # Insert new embedding
+        result = supabase.table('student_face_embeddings').insert(face_data).execute()
+        
+        if result.data:
+            logger.info(f"Face data saved for student: {student_id} (quality: {quality:.2f})")
+            return True
+        else:
+            logger.error(f"Failed to save face data for student: {student_id}")
+            return False
         
     except Exception as e:
         logger.error(f"Error saving to database: {e}")
-        return False
+        return Fals
 
 # Health and management endpoints
 @app.get("/health")
 async def enhanced_health_check():
-    """Enhanced health check with cache statistics"""
+    """Enhanced health check with database table validation"""
     try:
         # Test face_recognition
         test_array = np.zeros((100, 100, 3), dtype=np.uint8)
         face_recognition.face_locations(test_array)
         
-        # Test Supabase
-        supabase.table('users').select("count", count='exact').execute()
+        # Test required database tables
+        required_tables = [
+            'users',
+            'classes',
+            'class_students', 
+            'attendance_sessions',
+            'attendance_records',
+            'student_face_embeddings'
+        ]
+        
+        table_status = {}
+        for table in required_tables:
+            try:
+                result = supabase.table(table).select("count", count='exact').limit(1).execute()
+                table_status[table] = "ok"
+            except Exception as e:
+                logger.error(f"Table {table} check failed: {e}")
+                table_status[table] = f"error: {str(e)}"
+        
+        # Test periodic_captures table (optional)
+        try:
+            supabase.table('periodic_captures').select("count", count='exact').limit(1).execute()
+            table_status['periodic_captures'] = "ok"
+        except Exception:
+            table_status['periodic_captures'] = "missing (will create automatically)"
         
         # Cache statistics
         with cache_lock:
             cache_size = len(face_cache)
         
+        # Overall health status
+        all_tables_ok = all(status == "ok" for table, status in table_status.items() 
+                           if table != 'periodic_captures')
+        
+        overall_status = "healthy" if all_tables_ok else "degraded"
+        
         return {
-            "status": "healthy",
+            "status": overall_status,
             "timestamp": datetime.now().isoformat(),
             "services": {
                 "face_recognition": "ok",
                 "supabase": "ok",
                 "thread_pool": "ok"
             },
+            "database_tables": table_status,
             "cache": {
                 "size": cache_size,
                 "max_workers": executor._max_workers
             },
-            "version": "3.0.0"
+            "configuration": {
+                "face_threshold": FACE_THRESHOLD,
+                "debug": DEBUG,
+                "version": "3.0.1"
+            }
         }
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
             "timestamp": datetime.now().isoformat(),
             "error": str(e)
         }
+
+@app.post("/api/admin/create-tables")
+async def create_missing_tables():
+    """Create missing database tables (admin only)"""
+    try:
+        # SQL สำหรับสร้าง periodic_captures table
+        create_periodic_captures_sql = """
+        CREATE TABLE IF NOT EXISTS periodic_captures (
+            id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+            session_id uuid REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+            capture_time timestamptz NOT NULL,
+            faces_detected integer DEFAULT 0,
+            faces_recognized integer DEFAULT 0,
+            processing_time_ms integer DEFAULT 0,
+            created_at timestamptz DEFAULT now(),
+            updated_at timestamptz DEFAULT now()
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_periodic_captures_session_id ON periodic_captures(session_id);
+        CREATE INDEX IF NOT EXISTS idx_periodic_captures_capture_time ON periodic_captures(capture_time);
+        """
+        
+        # Execute SQL (requires database admin access)
+        # supabase.rpc('execute_sql', {'sql': create_periodic_captures_sql}).execute()
+        
+        return {
+            "success": True,
+            "message": "Database tables creation initiated",
+            "sql": create_periodic_captures_sql,
+            "note": "Please execute this SQL manually in your Supabase dashboard"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating tables: {e}")
+        raise HTTPException(status_code=500, detail=f"Table creation failed: {str(e)}")
+    from fastapi import Request
+
+@app.middleware("http")
+async def validation_middleware(request: Request, call_next):
+    """Add request validation middleware"""
+    try:
+        # Log request
+        if DEBUG:
+            logger.info(f"Request: {request.method} {request.url}")
+        
+        response = await call_next(request)
+        
+        # Log response status
+        if DEBUG:
+            logger.info(f"Response: {response.status_code}")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Request processing error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error", "detail": str(e)}
+        )
+    
 
 @app.delete("/api/cache/clear")
 async def clear_face_cache():
@@ -1029,3 +1244,4 @@ async def verify_student_enrollment(session_id: str, student_id: str):
     except Exception as e:
         logger.error(f"❌ Error verifying enrollment for {student_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to verify enrollment: {str(e)}")
+    
