@@ -1,8 +1,10 @@
 // lib/data/services/unified_camera_service.dart
 // รวม PeriodicCameraService และ EnhancedPeriodicCameraService เป็นตัวเดียว
+// แก้ไขให้รองรับ Web/Desktop
 
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
@@ -53,17 +55,29 @@ class UnifiedCameraService {
         throw Exception('No cameras available on this device');
       }
 
-      // Prefer front camera, fallback to any available camera
-      final frontCamera = _availableCameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.front,
-        orElse: () => _availableCameras.first,
-      );
+      // สำหรับ desktop/web ใช้กล้องแรกที่เจอ (มักเป็น webcam)
+      // สำหรับ mobile หา front camera
+      CameraDescription selectedCamera;
+      
+      if (kIsWeb) {
+        // Web: ใช้กล้องแรกที่เจอ
+        selectedCamera = _availableCameras.first;
+      } else if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+        // Desktop: ใช้กล้องแรกที่เจอ (webcam)
+        selectedCamera = _availableCameras.first;
+      } else {
+        // Mobile: หา front camera
+        selectedCamera = _availableCameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.front,
+          orElse: () => _availableCameras.first,
+        );
+      }
 
-      await _initializeController(frontCamera);
+      await _initializeController(selectedCamera);
       
       _setState(CameraState.ready);
       print('✅ Unified camera service initialized successfully');
-      print('📷 Using camera: ${frontCamera.name} (${frontCamera.lensDirection})');
+      print('📷 Using camera: ${selectedCamera.name} (${selectedCamera.lensDirection})');
       
       return true;
     } catch (e) {
@@ -75,9 +89,20 @@ class UnifiedCameraService {
   }
 
   Future<void> _initializeController(CameraDescription camera) async {
+    // กำหนด resolution ตาม platform
+    ResolutionPreset resolution;
+    
+    if (kIsWeb) {
+      resolution = ResolutionPreset.medium; // Web รองรับดี
+    } else if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      resolution = ResolutionPreset.high; // Desktop webcam รองรับ high
+    } else {
+      resolution = ResolutionPreset.high; // Mobile
+    }
+
     _controller = CameraController(
       camera,
-      ResolutionPreset.high,
+      resolution,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
@@ -215,19 +240,7 @@ class UnifiedCameraService {
       final XFile imageFile = await _controller!.takePicture();
       
       // Save to permanent location
-      final Directory appDir = await getApplicationDocumentsDirectory();
-      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final String fileName = 'capture_${timestamp}.jpg';
-      final String savedPath = path.join(appDir.path, 'captures', fileName);
-      
-      // Ensure directory exists
-      final Directory captureDir = Directory(path.dirname(savedPath));
-      if (!await captureDir.exists()) {
-        await captureDir.create(recursive: true);
-      }
-      
-      // Copy to permanent location
-      await File(imageFile.path).copy(savedPath);
+      final String savedPath = await _saveImageFile(imageFile);
       
       // Delete temporary file
       try {
@@ -242,6 +255,57 @@ class UnifiedCameraService {
     } catch (e) {
       print('❌ Error in _captureAndSave: $e');
       throw Exception('Failed to capture and save image: $e');
+    }
+  }
+
+  Future<String> _saveImageFile(XFile imageFile) async {
+    // สำหรับ platform ที่แตกต่างกัน
+    if (kIsWeb) {
+      return await _saveImageWeb(imageFile);
+    } else {
+      return await _saveImageDesktopMobile(imageFile);
+    }
+  }
+
+  Future<String> _saveImageWeb(XFile imageFile) async {
+    try {
+      // Web: อ่านเป็น bytes แล้วสร้าง path
+      final bytes = await imageFile.readAsBytes();
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String fileName = 'capture_${timestamp}.jpg';
+      
+      // Web จะเก็บใน memory หรือ IndexedDB
+      // สำหรับ demo ใช้ temporary path
+      final String tempPath = '/captures/$fileName';
+      
+      // ใน production อาจต้องใช้ web-specific storage
+      print('📷 Web image captured: $fileName (${bytes.length} bytes)');
+      
+      return tempPath;
+    } catch (e) {
+      throw Exception('Failed to save image on web: $e');
+    }
+  }
+
+  Future<String> _saveImageDesktopMobile(XFile imageFile) async {
+    try {
+      final Directory appDir = await getApplicationDocumentsDirectory();
+      final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final String fileName = 'capture_${timestamp}.jpg';
+      final String savedPath = path.join(appDir.path, 'captures', fileName);
+      
+      // Ensure directory exists
+      final Directory captureDir = Directory(path.dirname(savedPath));
+      if (!await captureDir.exists()) {
+        await captureDir.create(recursive: true);
+      }
+      
+      // Copy to permanent location
+      await File(imageFile.path).copy(savedPath);
+      
+      return savedPath;
+    } catch (e) {
+      throw Exception('Failed to save image on desktop/mobile: $e');
     }
   }
 
@@ -336,9 +400,20 @@ class UnifiedCameraService {
       'last_capture_time': DateTime.now().toIso8601String(),
       'available_cameras': _availableCameras.length,
       'current_camera': _controller?.description.name,
+      'platform': _getPlatformName(),
     };
     
     onStatsUpdated?.call(stats);
+  }
+
+  String _getPlatformName() {
+    if (kIsWeb) return 'web';
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isMacOS) return 'macos';
+    if (Platform.isLinux) return 'linux';
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isIOS) return 'ios';
+    return 'unknown';
   }
 
   // ==================== Information & Utilities ====================
@@ -357,7 +432,8 @@ class UnifiedCameraService {
       }).toList(),
       'current_camera': _controller?.description.name,
       'resolution': _controller?.resolutionPreset.toString(),
-      'has_flash': _availableCameras.isNotEmpty ? _availableCameras.first.lensDirection != null : false,
+      'platform': _getPlatformName(),
+      'has_flash': _availableCameras.isNotEmpty,
     };
   }
 
@@ -431,6 +507,11 @@ class UnifiedCameraService {
   // ==================== Cleanup & Maintenance ====================
 
   Future<void> cleanupOldImages({int maxAgeHours = 24}) async {
+    if (kIsWeb) {
+      print('📁 Cleanup not supported on web platform');
+      return;
+    }
+
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
       final Directory captureDir = Directory(path.join(appDir.path, 'captures'));
@@ -475,6 +556,14 @@ class UnifiedCameraService {
   }
 
   Future<Map<String, dynamic>> getStorageInfo() async {
+    if (kIsWeb) {
+      return {
+        'platform': 'web',
+        'storage_type': 'browser_memory',
+        'cleanup_supported': false,
+      };
+    }
+
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
       final Directory captureDir = Directory(path.join(appDir.path, 'captures'));
@@ -484,6 +573,7 @@ class UnifiedCameraService {
           'directory_exists': false,
           'file_count': 0,
           'total_size_mb': 0.0,
+          'platform': _getPlatformName(),
         };
       }
       
@@ -503,6 +593,7 @@ class UnifiedCameraService {
         'file_count': files.length,
         'total_size_mb': (totalSize / 1024 / 1024),
         'files': files.map((f) => path.basename(f.path)).toList(),
+        'platform': _getPlatformName(),
       };
       
     } catch (e) {

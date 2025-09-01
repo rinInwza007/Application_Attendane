@@ -36,7 +36,7 @@ class UnifiedFaceService {
   // Model constants
   static const int MODEL_INPUT_SIZE = 112;
   static const int EMBEDDING_SIZE = 128;
-  static const String MODEL_FILE = 'assets/converted_model.tflite';
+  static const String MODEL_FILE = 'assets/model160x160.tflite';
   static const double FACE_SIMILARITY_THRESHOLD = 0.7;
 
   // Callbacks
@@ -99,8 +99,8 @@ class UnifiedFaceService {
   Future<void> _loadTFLiteModel() async {
     try {
       // Try to load model from assets
-      await rootBundle.load('assets/converted_model.tflite');
-      _interpreter = await Interpreter.fromAsset('converted_model.tflite');
+      await rootBundle.load('assets/model160x160.tflite');
+      _interpreter = await Interpreter.fromAsset('model160x160.tflite');
       print('✅ TFLite model loaded successfully');
     } catch (e) {
       print('⚠️ TFLite model not available, using dummy embeddings: $e');

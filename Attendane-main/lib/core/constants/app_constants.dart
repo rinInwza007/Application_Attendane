@@ -64,8 +64,14 @@ class AppConstants {
   static final RegExp inviteCodePattern = RegExp(r'^[A-Z0-9]{6}$');
   
   // ==================== Face Recognition Configuration ====================
-  static const int faceModelInputSize = 112;
+  
+  // Model Configuration - Updated for model160x160.tflite
+  static const String faceModelPath = 'assets/model160x160.tflite';
+  static const int faceModelInputSize = 160; // Changed from 112 to 160
+  static const int faceModelInputChannels = 3;
   static const int faceEmbeddingSize = 128;
+  
+  // Recognition Thresholds
   static const double faceMatchThreshold = 0.7;
   static const double faceQualityThreshold = 0.6;
   static const int faceDetectionTimeoutSeconds = 30;
@@ -76,6 +82,11 @@ class AppConstants {
   static const double maxHeadRotationDegrees = 30.0;
   static const double maxHeadTiltDegrees = 20.0;
   static const double minEyeOpenProbability = 0.5;
+  
+  // Image Preprocessing for 160x160 model
+  static const double imageMean = 127.5;
+  static const double imageStd = 127.5;
+  static const bool normalizeImage = true;
   
   // ==================== File and Storage Limits ====================
   static const int maxImageSizeBytes = 10 * 1024 * 1024; // 10MB
@@ -126,6 +137,7 @@ class AppConstants {
   static const String multipleFacesMessage = 'Multiple faces detected. Please ensure only your face is visible.';
   static const String lowQualityFaceMessage = 'Face quality is too low. Please try again in better lighting.';
   static const String faceVerificationFailedMessage = 'Face verification failed. Please try again.';
+  static const String modelLoadFailedMessage = 'Failed to load face recognition model.';
   
   // Class Management Errors
   static const String classNotFoundMessage = 'Class not found. Please check the class code.';
@@ -141,6 +153,7 @@ class AppConstants {
   static const String classJoinedSuccessMessage = 'Successfully joined the class';
   static const String attendanceRecordedMessage = 'Attendance recorded successfully';
   static const String faceRegisteredMessage = 'Face recognition setup completed';
+  static const String modelLoadedMessage = 'Face recognition model loaded successfully';
   
   // ==================== Feature Flags ====================
   
@@ -180,6 +193,47 @@ class AppConstants {
   static String get testUserEmail => 'test@example.com';
   static String get testUserPassword => 'password123';
   
+  // ==================== Platform Configuration ====================
+  
+  // Platform-specific settings
+  static String get platformName {
+    if (kIsWeb) return 'web';
+    return defaultTargetPlatform.name.toLowerCase();
+  }
+  
+  // Camera settings per platform
+  static Map<String, dynamic> getCameraConfig() {
+    if (kIsWeb) {
+      return {
+        'resolution': 'medium',
+        'preferredCamera': 'user', // front camera
+        'maxRetries': 3,
+      };
+    } else {
+      return {
+        'resolution': 'high',
+        'preferredCamera': 'front',
+        'maxRetries': 5,
+      };
+    }
+  }
+  
+  // Face recognition config per platform
+  static Map<String, dynamic> getFaceRecognitionConfig() {
+    return {
+      'modelPath': faceModelPath,
+      'inputSize': faceModelInputSize,
+      'inputChannels': faceModelInputChannels,
+      'embeddingSize': faceEmbeddingSize,
+      'matchThreshold': faceMatchThreshold,
+      'qualityThreshold': faceQualityThreshold,
+      'imageMean': imageMean,
+      'imageStd': imageStd,
+      'normalize': normalizeImage,
+      'platform': platformName,
+    };
+  }
+  
   // ==================== Helper Methods ====================
   
   /// Check if an email is valid
@@ -216,6 +270,44 @@ class AppConstants {
       'enableDebugLogging': enableDebugLogging,
       'enableAnalytics': enableAnalytics,
       'appVersion': appVersion,
+      'platform': platformName,
+      'faceModelPath': faceModelPath,
+      'faceModelInputSize': faceModelInputSize,
+    };
+  }
+  
+  /// Get model configuration for TFLite interpreter
+  static Map<String, dynamic> getModelConfig() {
+    return {
+      'modelPath': faceModelPath,
+      'inputShape': [1, faceModelInputSize, faceModelInputSize, faceModelInputChannels],
+      'outputShape': [1, faceEmbeddingSize],
+      'inputType': 'float32',
+      'outputType': 'float32',
+      'mean': imageMean,
+      'std': imageStd,
+      'normalize': normalizeImage,
+    };
+  }
+  
+  /// Check if current platform supports face recognition
+  static bool get supportsFaceRecognition {
+    // Check if TFLite is supported on current platform
+    if (kIsWeb) {
+      // Web might have limited TFLite support
+      return false; // You might want to enable this later
+    }
+    return true; // Desktop and mobile support TFLite
+  }
+  
+  /// Get platform-specific file paths
+  static Map<String, String> getFilePaths() {
+    return {
+      'faceModel': faceModelPath,
+      'captures': 'captures/',
+      'faceImages': 'face_images/',
+      'temp': 'temp/',
+      'logs': 'logs/',
     };
   }
 }
