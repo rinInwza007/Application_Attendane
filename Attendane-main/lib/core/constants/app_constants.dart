@@ -1,5 +1,7 @@
 // lib/core/constants/app_constants.dart
 import 'package:flutter/foundation.dart';
+import 'package:camera/camera.dart';
+import 'dart:io';
 
 class AppConstants {
   // ==================== App Information ====================
@@ -43,6 +45,48 @@ class AppConstants {
   static const String userTypeKey = 'user_type';
   static const String themeKey = 'app_theme';
   static const String languageKey = 'app_language';
+  
+  // ==================== Device Camera Configuration ====================
+  
+  // Camera Resolution Settings
+  static const Map<String, ResolutionPreset> cameraResolutions = {
+    'low': ResolutionPreset.low,
+    'medium': ResolutionPreset.medium,
+    'high': ResolutionPreset.high,
+    'veryHigh': ResolutionPreset.veryHigh,
+    'ultraHigh': ResolutionPreset.ultraHigh,
+    'max': ResolutionPreset.max,
+  };
+
+  static ResolutionPreset get defaultCameraResolution {
+    if (kIsWeb) return ResolutionPreset.medium; // Web works better with medium
+    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return ResolutionPreset.high; // Desktop webcam
+    }
+    return ResolutionPreset.high; // Mobile
+  }
+
+  // Camera Capture Settings
+  static const int maxCaptureRetries = 3;
+  static const Duration captureTimeout = Duration(seconds: 15);
+  static const bool enableCameraPreview = true;
+  static const bool enableCameraSwitching = true;
+  static const bool enableTorchControl = true;
+  
+  // Preferred Camera Direction per Platform
+  static CameraLensDirection get preferredCameraDirection {
+    if (kIsWeb || Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return CameraLensDirection.front; // Usually the default webcam
+    }
+    return CameraLensDirection.front; // Mobile front camera for selfies
+  }
+  
+  // Image Quality Settings
+  static const int defaultImageQuality = 90; // 0-100
+  static const bool compressImages = true;
+  static const int maxImageWidthForUpload = 1024;
+  static const int maxImageHeightForUpload = 1024;
+  static const bool enableImageOptimization = true;
   
   // ==================== Default Values ====================
   static const int defaultPageSize = 20;
@@ -96,6 +140,11 @@ class AppConstants {
   
   static const List<String> supportedImageFormats = ['.jpg', '.jpeg', '.png'];
   
+  // Storage Cleanup Settings
+  static const int maxStoredCapturesPerSession = 100;
+  static const int cleanupOldFilesAfterHours = 24;
+  static const int maxTotalStorageMB = 500;
+  
   // ==================== Network Configuration ====================
   static const Duration networkTimeout = Duration(seconds: 30);
   static const Duration shortTimeout = Duration(seconds: 10);
@@ -132,6 +181,13 @@ class AppConstants {
   static const String sessionExpiredMessage = 'Your session has expired. Please log in again.';
   static const String unauthorizedMessage = 'You are not authorized to perform this action.';
   
+  // Camera Errors
+  static const String noCameraMessage = 'No camera available on this device.';
+  static const String cameraPermissionMessage = 'Camera permission is required for attendance check-in.';
+  static const String cameraInitFailedMessage = 'Failed to initialize camera. Please try again.';
+  static const String captureFailedMessage = 'Failed to capture image. Please try again.';
+  static const String cameraNotReadyMessage = 'Camera is not ready. Please wait a moment.';
+  
   // Face Recognition Errors
   static const String noFaceDetectedMessage = 'No face detected. Please ensure your face is visible.';
   static const String multipleFacesMessage = 'Multiple faces detected. Please ensure only your face is visible.';
@@ -154,6 +210,8 @@ class AppConstants {
   static const String attendanceRecordedMessage = 'Attendance recorded successfully';
   static const String faceRegisteredMessage = 'Face recognition setup completed';
   static const String modelLoadedMessage = 'Face recognition model loaded successfully';
+  static const String cameraInitializedMessage = 'Camera initialized successfully';
+  static const String imageCapturedMessage = 'Image captured successfully';
   
   // ==================== Feature Flags ====================
   
@@ -164,6 +222,13 @@ class AppConstants {
   static bool get enableCrashReporting => isProduction;
   static bool get enableDebugLogging => isDevelopment;
   static bool get enableFaceAntiSpoofing => true;
+  
+  // Device Camera Features
+  static bool get enableDeviceCamera => true;
+  static bool get enableCameraFlash => !kIsWeb; // Flash not available on web
+  static bool get enableCameraZoom => !kIsWeb; // Zoom limited on web
+  static bool get enableMultipleCaptures => true;
+  static bool get enableCameraSwitchButton => true;
   
   // Experimental Features
   static bool get enableBiometricAuth => false;
@@ -208,12 +273,27 @@ class AppConstants {
         'resolution': 'medium',
         'preferredCamera': 'user', // front camera
         'maxRetries': 3,
+        'enableFlash': false,
+        'enableZoom': false,
+        'quality': 80,
+      };
+    } else if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return {
+        'resolution': 'high',
+        'preferredCamera': 'front', // webcam
+        'maxRetries': 5,
+        'enableFlash': false,
+        'enableZoom': true,
+        'quality': 90,
       };
     } else {
       return {
         'resolution': 'high',
         'preferredCamera': 'front',
         'maxRetries': 5,
+        'enableFlash': true,
+        'enableZoom': true,
+        'quality': 95,
       };
     }
   }
@@ -231,6 +311,7 @@ class AppConstants {
       'imageStd': imageStd,
       'normalize': normalizeImage,
       'platform': platformName,
+      'useDeviceCamera': enableDeviceCamera,
     };
   }
   
@@ -261,6 +342,11 @@ class AppConstants {
     return inviteCodePattern.hasMatch(inviteCode);
   }
   
+  /// Get camera resolution preset by name
+  static ResolutionPreset getCameraResolution(String resolutionName) {
+    return cameraResolutions[resolutionName] ?? defaultCameraResolution;
+  }
+  
   /// Get environment-specific configuration
   static Map<String, dynamic> getEnvironmentConfig() {
     return {
@@ -273,6 +359,8 @@ class AppConstants {
       'platform': platformName,
       'faceModelPath': faceModelPath,
       'faceModelInputSize': faceModelInputSize,
+      'enableDeviceCamera': enableDeviceCamera,
+      'defaultCameraResolution': defaultCameraResolution.toString(),
     };
   }
   
@@ -300,6 +388,11 @@ class AppConstants {
     return true; // Desktop and mobile support TFLite
   }
   
+  /// Check if current platform supports device camera
+  static bool get supportsDeviceCamera {
+    return true; // All platforms (Web, Desktop, Mobile) support camera
+  }
+  
   /// Get platform-specific file paths
   static Map<String, String> getFilePaths() {
     return {
@@ -308,6 +401,29 @@ class AppConstants {
       'faceImages': 'face_images/',
       'temp': 'temp/',
       'logs': 'logs/',
+      'attendance': 'attendance/',
     };
+  }
+  
+  /// Get camera permissions message for platform
+  static String getCameraPermissionMessage() {
+    if (kIsWeb) {
+      return 'Please allow camera access in your browser to continue.';
+    } else if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return 'Camera access is required. Please check your system camera permissions.';
+    } else {
+      return cameraPermissionMessage;
+    }
+  }
+  
+  /// Get optimal image size for platform
+  static Map<String, int> getOptimalImageSize() {
+    if (kIsWeb) {
+      return {'width': 640, 'height': 480}; // Web optimized
+    } else if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+      return {'width': 1280, 'height': 720}; // Desktop webcam
+    } else {
+      return {'width': maxImageWidthPixels, 'height': maxImageHeightPixels}; // Mobile
+    }
   }
 }

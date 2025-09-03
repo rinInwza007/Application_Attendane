@@ -5,7 +5,7 @@ import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/data/services/unified_attendance_service.dart';
-import 'package:myproject2/presentation/screens/face/realtime_face_detection_screen.dart';
+import 'package:myproject2/presentation/screens/face/multi_step_face_capture_screen.dart';
 
 class UpdatedStudentAttendanceScreen extends StatefulWidget {
   final String classId;
@@ -22,7 +22,7 @@ class UpdatedStudentAttendanceScreen extends StatefulWidget {
 }
 
 class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanceScreen> {
-  final UnifiedAttendanceService  _attendanceService = UnifiedAttendanceService ();
+  final UnifiedAttendanceService _attendanceService = UnifiedAttendanceService();
   final AuthService _authService = AuthService();
   
   AttendanceSessionModel? _currentSession;
@@ -108,8 +108,8 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     });
   }
 
-  // เช็คชื่อด้วย Real-time Face Detection
-  Future<void> _checkInWithFaceDetection() async {
+  // เช็คชื่อด้วย Multi-Step Face Capture
+  Future<void> _checkInWithMultiStepFaceCapture() async {
     if (_currentSession == null || _myAttendanceRecord != null) return;
 
     // ตรวจสอบว่ามีข้อมูลใบหน้าแล้วหรือยัง
@@ -122,16 +122,16 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     setState(() => _isCheckingIn = true);
 
     try {
-      // เปิดหน้าจอ Real-time Face Detection
+      // เปิดหน้าจอ Multi-Step Face Capture สำหรับ Face Recognition
       final result = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
-          builder: (context) => RealtimeFaceDetectionScreen(
-            sessionId: _currentSession!.id,
-            isRegistration: false,
-            instructionText: "วางใบหน้าของคุณในกรอบสีเขียวเพื่อเช็คชื่อ",
-            onCheckInSuccess: (message) {
-              print('✅ Check-in successful: $message');
+          builder: (context) => MultiStepFaceCaptureScreen(
+            studentEmail: _authService.getCurrentUserEmail(),
+            isUpdate: false, // ไม่ใช่การอัพเดต แต่เป็นการใช้งาน Face Recognition
+            onAllImagesCapture: (imagePaths) async {
+              // Process face recognition for attendance
+              await _processFaceRecognitionForAttendance(imagePaths);
             },
           ),
         ),
@@ -143,7 +143,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
         await _loadAttendanceHistory();
         
         _showSnackBar(
-          'เช็คชื่อสำเร็จด้วย Face Recognition!', 
+          'เช็คชื่อสำเร็จด้วย Multi-Step Face Recognition!', 
           Colors.green,
         );
       }
@@ -155,6 +155,29 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
       if (mounted) {
         setState(() => _isCheckingIn = false);
       }
+    }
+  }
+
+  // ประมวลผล Face Recognition สำหรับการเช็คชื่อ
+  Future<void> _processFaceRecognitionForAttendance(List<String> imagePaths) async {
+    try {
+      final userEmail = _authService.getCurrentUserEmail();
+      if (userEmail == null || _currentSession == null) return;
+
+      // ใช้ภาพแรกสำหรับ Face Recognition (หรืออาจใช้หลายภาพเพื่อความแม่นยำ)
+      final primaryImagePath = imagePaths.first;
+      
+      // เรียกใช้ service เพื่อทำ Face Recognition และบันทึกการเข้าเรียน
+      await _attendanceService.checkInWithFaceRecognition(
+        sessionId: _currentSession!.id,
+        studentEmail: userEmail,
+        imagePath: primaryImagePath,
+      );
+
+      print('✅ Face recognition attendance successful');
+    } catch (e) {
+      print('❌ Error processing face recognition for attendance: $e');
+      throw e;
     }
   }
 
@@ -178,13 +201,13 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               style: TextStyle(fontWeight: FontWeight.w500),
             ),
             SizedBox(height: 12),
-            Text('ประโยชน์ของ Face Recognition:'),
+            Text('ประโยชน์ของ Multi-Step Face Recognition:'),
             SizedBox(height: 8),
             Row(
               children: [
                 Icon(Icons.check, size: 16, color: Colors.green),
                 SizedBox(width: 8),
-                Expanded(child: Text('เช็คชื่อรวดเร็วและแม่นยำ')),
+                Expanded(child: Text('เช็คชื่อรวดเร็วและแม่นยำสูง')),
               ],
             ),
             SizedBox(height: 4),
@@ -192,7 +215,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               children: [
                 Icon(Icons.check, size: 16, color: Colors.green),
                 SizedBox(width: 8),
-                Expanded(child: Text('ป้องกันการโกงในการเช็คชื่อ')),
+                Expanded(child: Text('ป้องกันการโกงด้วยการถ่ายหลายมุม')),
               ],
             ),
             SizedBox(height: 4),
@@ -200,7 +223,15 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               children: [
                 Icon(Icons.check, size: 16, color: Colors.green),
                 SizedBox(width: 8),
-                Expanded(child: Text('ระบบความปลอดภัยสูง')),
+                Expanded(child: Text('ระบบความปลอดภัยระดับสูง')),
+              ],
+            ),
+            SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(Icons.check, size: 16, color: Colors.green),
+                SizedBox(width: 8),
+                Expanded(child: Text('ตรวจจับใบหน้าได้แม่นยำในทุกสภาพแสง')),
               ],
             ),
           ],
@@ -213,7 +244,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
           ElevatedButton.icon(
             onPressed: () {
               Navigator.of(context).pop();
-              _setupFaceRecognition();
+              _setupMultiStepFaceRecognition();
             },
             icon: const Icon(Icons.face),
             label: const Text('ตั้งค่าเลย'),
@@ -227,19 +258,25 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     );
   }
 
-  // ตั้งค่า Face Recognition สำหรับครั้งแรก
-  Future<void> _setupFaceRecognition() async {
+  // ตั้งค่า Multi-Step Face Recognition สำหรับครั้งแรก
+  Future<void> _setupMultiStepFaceRecognition() async {
     setState(() => _isCheckingIn = true);
 
     try {
+      final userEmail = _authService.getCurrentUserEmail();
+      if (userEmail == null) {
+        throw Exception('ไม่พบข้อมูลผู้ใช้');
+      }
+
       final result = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
-          builder: (context) => RealtimeFaceDetectionScreen(
-            isRegistration: true,
-            instructionText: "วางใบหน้าของคุณในกรอบ เพื่อลงทะเบียน Face Recognition",
-            onFaceEmbeddingCaptured: (embedding) {
-              print('✅ Face embedding captured for registration');
+          builder: (context) => MultiStepFaceCaptureScreen(
+            studentEmail: userEmail,
+            isUpdate: false, // ตั้งค่าใหม่
+            onAllImagesCapture: (imagePaths) async {
+              // บันทึกข้อมูล Face Embedding จากภาพหลายมุม
+              await _saveFaceEmbeddingFromImages(imagePaths, userEmail);
             },
           ),
         ),
@@ -247,7 +284,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
 
       if (result == true && mounted) {
         _showSnackBar(
-          'ตั้งค่า Face Recognition สำเร็จ!', 
+          'ตั้งค่า Multi-Step Face Recognition สำเร็จ!', 
           Colors.green,
         );
       }
@@ -259,6 +296,19 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
       if (mounted) {
         setState(() => _isCheckingIn = false);
       }
+    }
+  }
+
+  // บันทึก Face Embedding จากภาพหลายมุม
+  Future<void> _saveFaceEmbeddingFromImages(List<String> imagePaths, String userEmail) async {
+    try {
+      // ใช้ AuthService เพื่อบันทึก Face Embedding จากภาพหลายมุม
+      await _authService.saveFaceEmbeddingFromMultipleImages(imagePaths, userEmail);
+      
+      print('✅ Multi-step face embedding saved successfully');
+    } catch (e) {
+      print('❌ Error saving face embedding: $e');
+      throw e;
     }
   }
 
@@ -430,13 +480,13 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               ),
               const SizedBox(height: 16),
               
-              // Check-in button with Face Recognition
+              // Check-in button with Multi-Step Face Recognition
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: _isCheckingIn || !session.isActive 
                       ? null 
-                      : _checkInWithFaceDetection,
+                      : _checkInWithMultiStepFaceCapture,
                   icon: _isCheckingIn 
                       ? const SizedBox(
                           width: 20,
@@ -446,12 +496,12 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                             valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                           ),
                         )
-                      : const Icon(Icons.face_retouching_natural),
+                      : const Icon(Icons.face_6),
                   label: Text(
                     _isCheckingIn 
                         ? 'Processing...' 
                         : session.isActive 
-                            ? 'Check In with Face Recognition' 
+                            ? 'Check In with Multi-Step Face Recognition' 
                             : 'Session Ended',
                   ),
                   style: ElevatedButton.styleFrom(
@@ -491,12 +541,18 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Face Recognition Status',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
+            const Row(
+              children: [
+                Icon(Icons.face_6, color: Colors.blue, size: 24),
+                SizedBox(width: 8),
+                Text(
+                  'Multi-Step Face Recognition Status',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             
@@ -512,7 +568,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
                       SizedBox(width: 12),
-                      Text('Checking Face Recognition status...'),
+                      Text('Checking Multi-Step Face Recognition status...'),
                     ],
                   );
                 }
@@ -523,55 +579,118 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
                     color: hasFace ? Colors.green.shade50 : Colors.orange.shade50,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: hasFace ? Colors.green.shade200 : Colors.orange.shade200,
                     ),
                   ),
-                  child: Row(
+                  child: Column(
                     children: [
-                      Icon(
-                        hasFace ? Icons.verified_user : Icons.face_retouching_off,
-                        color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
-                        size: 32,
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              hasFace ? 'Face Recognition Ready' : 'Face Recognition Not Set Up',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
-                              ),
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: hasFace ? Colors.green.shade100 : Colors.orange.shade100,
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              hasFace 
-                                  ? 'You can use Face Recognition for attendance'
-                                  : 'Set up Face Recognition for quick attendance',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: hasFace ? Colors.green.shade600 : Colors.orange.shade600,
-                              ),
+                            child: Icon(
+                              hasFace ? Icons.verified_user : Icons.face_retouching_off,
+                              color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
+                              size: 32,
                             ),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  hasFace ? 'Multi-Step Face Recognition Ready' : 'Multi-Step Face Recognition Not Set Up',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: hasFace ? Colors.green.shade700 : Colors.orange.shade700,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  hasFace 
+                                      ? 'You can use advanced multi-step face recognition for secure attendance'
+                                      : 'Set up multi-step face recognition for ultra-secure attendance',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: hasFace ? Colors.green.shade600 : Colors.orange.shade600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      if (!hasFace)
-                        ElevatedButton.icon(
-                          onPressed: _isCheckingIn ? null : _setupFaceRecognition,
-                          icon: const Icon(Icons.face, size: 18),
-                          label: const Text('Setup'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.orange.shade400,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      
+                      if (hasFace) ...[
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.blue.shade200),
+                          ),
+                          child: Column(
+                            children: [
+                              const Text(
+                                '🔥 Multi-Step Features Enabled:',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.blue,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              const Row(
+                                children: [
+                                  Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                  SizedBox(width: 8),
+                                  Expanded(child: Text('6-step pose verification', style: TextStyle(fontSize: 12))),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              const Row(
+                                children: [
+                                  Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                  SizedBox(width: 8),
+                                  Expanded(child: Text('Advanced anti-spoofing protection', style: TextStyle(fontSize: 12))),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              const Row(
+                                children: [
+                                  Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                  SizedBox(width: 8),
+                                  Expanded(child: Text('Real-time quality assessment', style: TextStyle(fontSize: 12))),
+                                ],
+                              ),
+                            ],
                           ),
                         ),
+                      ] else ...[
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: _isCheckingIn ? null : _setupMultiStepFaceRecognition,
+                            icon: const Icon(Icons.face_6, size: 20),
+                            label: const Text('Setup Multi-Step Face Recognition'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.orange.shade400,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 );
@@ -641,7 +760,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
             Padding(
               padding: const EdgeInsets.only(top: 8),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: Colors.blue.shade100,
                   borderRadius: BorderRadius.circular(12),
@@ -649,10 +768,10 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.verified_user, size: 16, color: Colors.blue.shade700),
-                    const SizedBox(width: 4),
+                    Icon(Icons.face_6, size: 16, color: Colors.blue.shade700),
+                    const SizedBox(width: 6),
                     Text(
-                      'Verified with Face Recognition',
+                      'Verified with Multi-Step Face Recognition',
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.blue.shade700,
@@ -793,10 +912,10 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
           if (record.hasFaceMatch)
             Row(
               children: [
-                Icon(Icons.verified_user, size: 12, color: Colors.blue.shade600),
+                Icon(Icons.face_6, size: 12, color: Colors.blue.shade600),
                 const SizedBox(width: 4),
                 Text(
-                  'Face Recognition',
+                  'Multi-Step Face Recognition',
                   style: TextStyle(
                     fontSize: 11,
                     color: Colors.blue.shade600,
