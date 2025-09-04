@@ -1245,3 +1245,201 @@ async def verify_student_enrollment(session_id: str, student_id: str):
         logger.error(f"❌ Error verifying enrollment for {student_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to verify enrollment: {str(e)}")
     
+# main.py - Enhanced with phase-aware processing
+class AdaptiveProcessor:
+    def __init__(self):
+        self.phase_stats = {}
+        self.processing_priority = {
+            '0-10': 1,    # Highest priority
+            '10-20': 2,   # High priority  
+            '20-30': 3,   # Medium priority
+            '30-60': 4,   # Normal priority
+            '60-90': 5,   # Low priority
+            '90+': 6      # Lowest priority
+        }
+    
+    def get_processing_config(self, phase: str) -> Dict:
+        """Get processing configuration based on phase"""
+        configs = {
+            '0-10': {
+                'model_accuracy': 'high',      # ใช้ model ที่แม่นยำ
+                'face_threshold': 0.75,        # Threshold สูง
+                'max_processing_time': 3,      # 3 วินาที
+                'parallel_workers': 4,         # Worker เยอะ
+                'cache_results': True,         # Cache ผลลัพธ์
+                'priority': 1
+            },
+            '10-20': {
+                'model_accuracy': 'high',
+                'face_threshold': 0.7,
+                'max_processing_time': 4,
+                'parallel_workers': 3,
+                'cache_results': True,
+                'priority': 2
+            },
+            '20-30': {
+                'model_accuracy': 'medium',
+                'face_threshold': 0.7,
+                'max_processing_time': 5,
+                'parallel_workers': 2,
+                'cache_results': True,
+                'priority': 3
+            },
+            '30-60': {
+                'model_accuracy': 'medium',
+                'face_threshold': 0.65,
+                'max_processing_time': 6,
+                'parallel_workers': 2,
+                'cache_results': False,
+                'priority': 4
+            },
+            '60-90': {
+                'model_accuracy': 'standard',
+                'face_threshold': 0.65,
+                'max_processing_time': 8,
+                'parallel_workers': 1,
+                'cache_results': False,
+                'priority': 5
+            },
+            '90+': {
+                'model_accuracy': 'standard',
+                'face_threshold': 0.6,
+                'max_processing_time': 10,
+                'parallel_workers': 1,
+                'cache_results': False,
+                'priority': 6
+            }
+        }
+        return configs.get(phase, configs['30-60'])
+
+# Enhanced periodic attendance with phase awareness
+@app.post("/api/attendance/adaptive")
+async def process_adaptive_attendance(
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    session_id: str = Form(...),
+    capture_time: str = Form(...),
+    phase: str = Form(...),  # Phase information from client
+    elapsed_minutes: int = Form(...)
+):
+    try:
+        # Validate session
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').single().execute()
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Active session not found")
+        
+        session_data = session_result.data
+        processor = AdaptiveProcessor()
+        config = processor.get_processing_config(phase)
+        
+        # Priority queue based on phase
+        priority = config['priority']
+        
+        # Add to appropriate processing queue
+        await adaptive_queue.put({
+            "priority": priority,
+            "image_data": await image.read(),
+            "session_id": session_id,
+            "capture_time": capture_time,
+            "phase": phase,
+            "config": config,
+            "session_data": session_data
+        })
+        
+        # Start background processing
+        background_tasks.add_task(process_adaptive_queue)
+        
+        # Quick response
+        face_locations = face_recognition.face_locations(np.array(Image.open(io.BytesIO(await image.read()))), model="hog")
+        
+        return {
+            "success": True,
+            "phase": phase,
+            "elapsed_minutes": elapsed_minutes,
+            "faces_detected": len(face_locations),
+            "processing_priority": priority,
+            "queue_size": adaptive_queue.qsize(),
+            "config": config
+        }
+        
+    except Exception as e:
+        logger.error(f"Adaptive processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+# Priority queue for adaptive processing
+import heapq
+import asyncio
+
+class AdaptivePriorityQueue:
+    def __init__(self):
+        self.queue = []
+        self.index = 0
+        self.lock = asyncio.Lock()
+    
+    async def put(self, item):
+        async with self.lock:
+            priority = item['priority']
+            heapq.heappush(self.queue, (priority, self.index, item))
+            self.index += 1
+    
+    async def get(self):
+        async with self.lock:
+            if self.queue:
+                priority, index, item = heapq.heappop(self.queue)
+                return item
+            return None
+    
+    def qsize(self):
+        return len(self.queue)
+
+adaptive_queue = AdaptivePriorityQueue()
+
+async def process_adaptive_queue():
+    """Process adaptive queue with priority"""
+    while True:
+        item = await adaptive_queue.get()
+        if not item:
+            break
+            
+        try:
+            await process_adaptive_item(item)
+        except Exception as e:
+            logger.error(f"Adaptive queue processing error: {e}")
+
+async def process_adaptive_item(item: Dict):
+    """Process single adaptive item"""
+    config = item['config']
+    phase = item['phase']
+    
+    start_time = time.time()
+    
+    # Process with phase-specific configuration
+    image_pil = Image.open(io.BytesIO(item['image_data']))
+    if image_pil.mode != 'RGB':
+        image_pil = image_pil.convert('RGB')
+    
+    image_array = np.array(image_pil)
+    
+    # Get enrolled students (cached for efficiency)
+    class_id = item['session_data']['class_id']
+    enrolled_students = enhanced_cache.get_enrolled_students_cached(class_id)
+    
+    # Process faces with adaptive threshold
+    detected_faces = process_multiple_faces_adaptive(
+        image_array, 
+        enrolled_students,
+        threshold=config['face_threshold']
+    )
+    
+    processing_time = time.time() - start_time
+    
+    # Save results based on phase importance
+    if phase in ['0-10', '10-20'] or len(detected_faces) > 0:
+        # Always save for critical phases or when faces detected
+        await save_adaptive_results(item, detected_faces, processing_time)
+    elif phase in ['20-30', '30-60'] and processing_time < config['max_processing_time']:
+        # Save for medium phases if processed quickly
+        await save_adaptive_results(item, detected_faces, processing_time)
+    # For low-priority phases, only save if significant results
+    
+    logger.info(f"Adaptive processing [{phase}]: {processing_time:.2f}s, {len(detected_faces)} faces")

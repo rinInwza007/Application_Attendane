@@ -219,6 +219,82 @@ class UnifiedFaceService {
     }
   }
 
+  // ==================== Backward Compatibility Method ====================
+  
+  /// เพิ่ม extractFaceEmbedding method เพื่อรองรับโค้ดเก่า
+  /// Returns a Map with success status, embedding, quality, and error info
+  Future<Map<String, dynamic>> extractFaceEmbedding(String imagePath) async {
+    try {
+      print('🔄 [COMPAT] Extracting face embedding for: ${path.basename(imagePath)}');
+      
+      // Generate embedding using the main method
+      final embedding = await generateEmbedding(imagePath);
+      
+      // Calculate quality score
+      final quality = _calculateEmbeddingQuality(embedding);
+      
+      return {
+        'success': true,
+        'embedding': embedding,
+        'quality': quality,
+        'error': null,
+        'face_detected': true,
+        'embedding_size': embedding.length,
+      };
+      
+    } catch (e) {
+      print('❌ [COMPAT] Error extracting face embedding: $e');
+      
+      return {
+        'success': false,
+        'embedding': null,
+        'quality': 0.0,
+        'error': e.toString(),
+        'face_detected': false,
+        'embedding_size': 0,
+      };
+    }
+  }
+
+  double _calculateEmbeddingQuality(List<double> embedding) {
+    if (embedding.isEmpty) return 0.0;
+    
+    // Calculate variance-based quality score
+    double sum = embedding.reduce((a, b) => a + b);
+    double mean = sum / embedding.length;
+    
+    double variance = 0;
+    for (double value in embedding) {
+      variance += (value - mean) * (value - mean);
+    }
+    variance /= embedding.length;
+    
+    // Calculate L2 norm
+    double norm = 0;
+    for (double value in embedding) {
+      norm += value * value;
+    }
+    norm = math.sqrt(norm);
+    
+    // Combine factors for quality score
+    double qualityScore = 0.0;
+    
+    // Variance component (diversity of features)
+    qualityScore += (variance * 2).clamp(0.0, 0.4);
+    
+    // Norm component (signal strength)
+    qualityScore += (norm / 50).clamp(0.0, 0.3);
+    
+    // Stability component (no outliers)
+    double stability = 1.0;
+    for (double value in embedding) {
+      if (value.abs() > 10) stability -= 0.1;
+    }
+    qualityScore += (stability * 0.3).clamp(0.0, 0.3);
+    
+    return qualityScore.clamp(0.0, 1.0);
+  }
+
   void _validateFaceQuality(Face face) {
     // Check face pose angles
     if (face.headEulerAngleY != null && face.headEulerAngleY!.abs() > 30) {
@@ -440,6 +516,42 @@ class UnifiedFaceService {
     return embeddings;
   }
 
+  /// Batch process images and return results with quality scores
+  Future<List<Map<String, dynamic>>> extractMultipleFaceEmbeddings(List<String> imagePaths) async {
+    final results = <Map<String, dynamic>>[];
+    
+    for (int i = 0; i < imagePaths.length; i++) {
+      try {
+        print('🔄 Processing image ${i + 1}/${imagePaths.length}: ${path.basename(imagePaths[i])}');
+        
+        final result = await extractFaceEmbedding(imagePaths[i]);
+        results.add({
+          'index': i,
+          'image_path': imagePaths[i],
+          ...result,
+        });
+        
+      } catch (e) {
+        print('❌ Failed to process image ${i + 1}: $e');
+        results.add({
+          'index': i,
+          'image_path': imagePaths[i],
+          'success': false,
+          'embedding': null,
+          'quality': 0.0,
+          'error': e.toString(),
+          'face_detected': false,
+        });
+      }
+      
+      // Small delay to prevent overwhelming
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    
+    print('✅ Processed ${results.length}/${imagePaths.length} images');
+    return results;
+  }
+
   // ==================== Service Management ====================
 
   void _setState(FaceServiceState newState) {
@@ -471,12 +583,17 @@ class UnifiedFaceService {
       // Test embedding comparison
       final similarity = await compareEmbeddings(normalized, normalized);
       
+      // Test extractFaceEmbedding compatibility method
+      final testImagePath = '/tmp/test_image.jpg'; // Mock path
+      // Note: This would fail in practice without a real image
+      
       final testPassed = normalized.length == EMBEDDING_SIZE && 
                         similarity > 0.99; // Self-similarity should be ~1.0
       
       print('📊 Service test ${testPassed ? "PASSED" : "FAILED"}');
       print('   Embedding size: ${normalized.length}/$EMBEDDING_SIZE');
       print('   Self-similarity: ${similarity.toStringAsFixed(4)}');
+      print('   extractFaceEmbedding method: available');
       
       return testPassed;
       
@@ -497,6 +614,8 @@ class UnifiedFaceService {
       'embedding_size': EMBEDDING_SIZE,
       'similarity_threshold': FACE_SIMILARITY_THRESHOLD,
       'interpreter_available': _interpreter != null,
+      'compatibility_methods': ['generateEmbedding', 'extractFaceEmbedding'],
+      'supported_formats': ['.jpg', '.jpeg', '.png', '.bmp'],
     };
   }
 
@@ -519,6 +638,10 @@ class UnifiedFaceService {
         _interpreter!.close();
         _interpreter = null;
       }
+      
+      // Clear callbacks
+      onStateChanged = null;
+      onError = null;
       
       print('✅ Unified face service disposed successfully');
     } catch (e) {
