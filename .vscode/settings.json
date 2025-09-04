@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/User/Desktop/App/Application_Attendane/Attendane-main/linux/flutter"
+    "cmake.sourceDirectory": "C:/Users/User/Desktop/App/Application_Attendane/Attendane-main/linux/flutter",
+    "java.configuration.updateBuildConfiguration": "interactive"
 }

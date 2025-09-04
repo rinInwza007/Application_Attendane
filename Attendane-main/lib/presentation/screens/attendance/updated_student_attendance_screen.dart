@@ -5,6 +5,7 @@ import 'package:myproject2/data/models/attendance_record_model.dart';
 import 'package:myproject2/data/models/attendance_session_model.dart';
 import 'package:myproject2/data/services/auth_service.dart';
 import 'package:myproject2/data/services/unified_attendance_service.dart';
+import 'package:myproject2/data/services/unified_face_service.dart';
 import 'package:myproject2/presentation/screens/face/multi_step_face_capture_screen.dart';
 
 class UpdatedStudentAttendanceScreen extends StatefulWidget {
@@ -108,7 +109,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     });
   }
 
-  // เช็คชื่อด้วย Multi-Step Face Capture
+  // เช็คชื่อด้วย Multi-Step Face Capture (แก้ไขแล้ว)
   Future<void> _checkInWithMultiStepFaceCapture() async {
     if (_currentSession == null || _myAttendanceRecord != null) return;
 
@@ -158,25 +159,102 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     }
   }
 
-  // ประมวลผล Face Recognition สำหรับการเช็คชื่อ
+  // ประมวลผล Face Recognition สำหรับการเช็คชื่อ (แก้ไขให้ใช้ method ที่มีจริง)
   Future<void> _processFaceRecognitionForAttendance(List<String> imagePaths) async {
     try {
       final userEmail = _authService.getCurrentUserEmail();
       if (userEmail == null || _currentSession == null) return;
 
-      // ใช้ภาพแรกสำหรับ Face Recognition (หรืออาจใช้หลายภาพเพื่อความแม่นยำ)
-      final primaryImagePath = imagePaths.first;
-      
-      // เรียกใช้ service เพื่อทำ Face Recognition และบันทึกการเข้าเรียน
-      await _attendanceService.checkInWithFaceRecognition(
-        sessionId: _currentSession!.id,
-        studentEmail: userEmail,
-        imagePath: primaryImagePath,
-      );
+      print('🔄 Processing face recognition for attendance...');
+      print('📸 Images captured: ${imagePaths.length}');
 
-      print('✅ Face recognition attendance successful');
+      // ใช้ UnifiedFaceService เพื่อ generate embedding จากภาพแรก
+      final faceService = UnifiedFaceService();
+      await faceService.initialize();
+
+      try {
+        // Generate face embedding จากภาพหลายมุม (ใช้ภาพแรก)
+        final primaryImagePath = imagePaths.first;
+        final embedding = await faceService.generateEmbedding(primaryImagePath);
+
+        print('✅ Face embedding generated successfully');
+
+        // เช็คชื่อด้วย face embedding (ใช้ method ที่มีจริง)
+        final attendanceRecord = await _attendanceService.faceCheckIn(
+  sessionId: _currentSession!.id,
+  faceEmbedding: embedding,
+  // จะใช้ dynamic threshold ตาม quality ของ stored embedding
+);
+
+        print('✅ Face check-in successful');
+        print('📊 Attendance status: ${attendanceRecord.status}');
+
+        // แสดงผลลัพธ์
+        if (mounted) {
+          _showSnackBar(
+            'Face Recognition เช็คชื่อสำเร็จ! สถานะ: ${attendanceRecord.status.toUpperCase()}',
+            attendanceRecord.status == 'present' ? Colors.green : Colors.orange,
+          );
+        }
+
+      } finally {
+        await faceService.dispose();
+      }
+
     } catch (e) {
       print('❌ Error processing face recognition for attendance: $e');
+      
+      // Fallback: ลองใช้ AuthService แทน
+      try {
+        await _processFaceRecognitionWithAuthService(imagePaths);
+      } catch (e2) {
+        print('❌ AuthService fallback also failed: $e2');
+        throw Exception('Face recognition check-in failed: $e');
+      }
+    }
+  }
+
+  // Method สำรองใช้ AuthService
+  Future<void> _processFaceRecognitionWithAuthService(List<String> imagePaths) async {
+    try {
+      final userEmail = _authService.getCurrentUserEmail();
+      if (userEmail == null || _currentSession == null) return;
+
+      // ใช้ AuthService เพื่อตรวจสอบใบหน้าจากภาพหลายมุม
+      final userProfile = await _authService.getUserProfile();
+      if (userProfile == null) throw Exception('User profile not found');
+
+      final studentId = userProfile['school_id'];
+      
+      // ใช้ verifyFaceFromMultipleImages method ที่มีอยู่จริงใน AuthService
+      final verificationResult = await _authService.verifyFaceFromMultipleImages(
+        studentId,
+        imagePaths,
+      );
+
+      if (!verificationResult['verified']) {
+        throw Exception('Face verification failed: ${verificationResult['error'] ?? 'Low similarity score'}');
+      }
+
+      print('✅ Face verification successful with AuthService');
+
+      // เช็คชื่อแบบง่ายหลังจากยืนยันตัวตนแล้ว
+      final attendanceRecord = await _attendanceService.simpleCheckIn(
+        sessionId: _currentSession!.id,
+      );
+
+      print('✅ Simple check-in successful after face verification');
+      print('📊 Attendance status: ${attendanceRecord.status}');
+
+      if (mounted) {
+        _showSnackBar(
+          'Multi-Step Face Verification + Check-in สำเร็จ! สถานะ: ${attendanceRecord.status.toUpperCase()}',
+          attendanceRecord.status == 'present' ? Colors.green : Colors.orange,
+        );
+      }
+
+    } catch (e) {
+      print('❌ Error in AuthService face recognition: $e');
       throw e;
     }
   }
@@ -332,9 +410,27 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message),
+        content: Row(
+          children: [
+            Icon(
+              backgroundColor == Colors.green ? Icons.check_circle :
+              backgroundColor == Colors.red ? Icons.error :
+              backgroundColor == Colors.orange ? Icons.warning :
+              Icons.info,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message)),
+          ],
+        ),
         backgroundColor: backgroundColor,
         duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
       ),
     );
   }
@@ -343,8 +439,10 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Attendance - ${widget.className}'),
+        title: Text('Multi-Step Attendance - ${widget.className}'),
         centerTitle: true,
+        backgroundColor: Colors.blue.shade400,
+        foregroundColor: Colors.white,
       ),
       body: _isLoading 
           ? const Center(child: CircularProgressIndicator())
@@ -405,6 +503,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     final hasCheckedIn = _myAttendanceRecord != null;
 
     return Card(
+      elevation: 4,
       color: hasCheckedIn 
           ? Colors.green.shade50 
           : isOnTimePeriod 
@@ -417,18 +516,29 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
           children: [
             Row(
               children: [
-                Icon(
-                  hasCheckedIn 
-                      ? Icons.check_circle 
-                      : Icons.access_time,
-                  color: hasCheckedIn 
-                      ? Colors.green 
-                      : isOnTimePeriod 
-                          ? Colors.blue 
-                          : Colors.orange,
-                  size: 28,
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: hasCheckedIn 
+                        ? Colors.green.shade100 
+                        : isOnTimePeriod 
+                            ? Colors.blue.shade100 
+                            : Colors.orange.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    hasCheckedIn 
+                        ? Icons.check_circle 
+                        : Icons.access_time,
+                    color: hasCheckedIn 
+                        ? Colors.green.shade700 
+                        : isOnTimePeriod 
+                            ? Colors.blue.shade700 
+                            : Colors.orange.shade700,
+                    size: 28,
+                  ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -436,7 +546,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                       Text(
                         hasCheckedIn 
                             ? 'Attendance Recorded' 
-                            : 'Attendance Session Active',
+                            : 'Multi-Step Session Active',
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -444,14 +554,17 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                       ),
                       Text(
                         'Started: ${_formatTime(session.startTime)}',
-                        style: const TextStyle(color: Colors.grey),
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 14,
+                        ),
                       ),
                     ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             
             if (hasCheckedIn) ...[
               _buildAttendanceStatusCard(_myAttendanceRecord!),
@@ -468,7 +581,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                       timeRemaining.isNegative ? Colors.red : Colors.blue,
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: _buildTimeInfoChip(
                       isOnTimePeriod ? 'On-time Until' : 'Late Since',
@@ -478,53 +591,93 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 20),
               
-              // Check-in button with Multi-Step Face Recognition
-              SizedBox(
+              // Enhanced Check-in button with Multi-Step Face Recognition
+              Container(
                 width: double.infinity,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: session.isActive 
+                        ? (isOnTimePeriod 
+                            ? [Colors.green.shade400, Colors.green.shade600]
+                            : [Colors.orange.shade400, Colors.orange.shade600])
+                        : [Colors.grey.shade400, Colors.grey.shade600],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: session.isActive ? [
+                    BoxShadow(
+                      color: (isOnTimePeriod ? Colors.green : Colors.orange).withOpacity(0.3),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ] : [],
+                ),
                 child: ElevatedButton.icon(
                   onPressed: _isCheckingIn || !session.isActive 
                       ? null 
                       : _checkInWithMultiStepFaceCapture,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    shadowColor: Colors.transparent,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
                   icon: _isCheckingIn 
                       ? const SizedBox(
-                          width: 20,
-                          height: 20,
+                          width: 24,
+                          height: 24,
                           child: CircularProgressIndicator(
-                            strokeWidth: 2,
+                            strokeWidth: 2.5,
                             valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                           ),
                         )
-                      : const Icon(Icons.face_6),
+                      : const Icon(Icons.face_6, size: 24),
                   label: Text(
                     _isCheckingIn 
-                        ? 'Processing...' 
+                        ? 'Processing Multi-Step Recognition...' 
                         : session.isActive 
                             ? 'Check In with Multi-Step Face Recognition' 
                             : 'Session Ended',
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: session.isActive 
-                        ? (isOnTimePeriod ? Colors.green : Colors.orange)
-                        : Colors.grey,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
               ),
               
               if (!isOnTimePeriod && session.isActive)
                 Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    '⚠️ You will be marked as LATE if you check in now',
-                    style: TextStyle(
-                      color: Colors.orange.shade700,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade100,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.shade300),
                     ),
-                    textAlign: TextAlign.center,
+                    child: Row(
+                      children: [
+                        Icon(Icons.warning_amber, color: Colors.orange.shade700, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'You will be marked as LATE if you check in now',
+                            style: TextStyle(
+                              color: Colors.orange.shade700,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
             ],
@@ -536,25 +689,27 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
 
   Widget _buildFaceRecognitionStatusCard() {
     return Card(
+      elevation: 3,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Row(
               children: [
-                Icon(Icons.face_6, color: Colors.blue, size: 24),
-                SizedBox(width: 8),
+                Icon(Icons.face_6, color: Colors.blue, size: 28),
+                SizedBox(width: 12),
                 Text(
                   'Multi-Step Face Recognition Status',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
+                    color: Colors.blue,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             
             FutureBuilder<bool>(
               future: _authService.hasFaceEmbedding(),
@@ -576,12 +731,19 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                 final hasFace = snapshot.data ?? false;
                 
                 return Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: hasFace ? Colors.green.shade50 : Colors.orange.shade50,
-                    borderRadius: BorderRadius.circular(12),
+                    gradient: LinearGradient(
+                      colors: hasFace 
+                          ? [Colors.green.shade50, Colors.green.shade100]
+                          : [Colors.orange.shade50, Colors.orange.shade100],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(16),
                     border: Border.all(
                       color: hasFace ? Colors.green.shade200 : Colors.orange.shade200,
+                      width: 2,
                     ),
                   ),
                   child: Column(
@@ -589,10 +751,10 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                       Row(
                         children: [
                           Container(
-                            padding: const EdgeInsets.all(12),
+                            padding: const EdgeInsets.all(16),
                             decoration: BoxDecoration(
-                              color: hasFace ? Colors.green.shade100 : Colors.orange.shade100,
-                              borderRadius: BorderRadius.circular(12),
+                              color: hasFace ? Colors.green.shade200 : Colors.orange.shade200,
+                              borderRadius: BorderRadius.circular(16),
                             ),
                             child: Icon(
                               hasFace ? Icons.verified_user : Icons.face_retouching_off,
@@ -600,13 +762,13 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                               size: 32,
                             ),
                           ),
-                          const SizedBox(width: 16),
+                          const SizedBox(width: 20),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  hasFace ? 'Multi-Step Face Recognition Ready' : 'Multi-Step Face Recognition Not Set Up',
+                                  hasFace ? 'Multi-Step Ready!' : 'Setup Required',
                                   style: TextStyle(
                                     fontSize: 16,
                                     fontWeight: FontWeight.bold,
@@ -616,8 +778,8 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                                 const SizedBox(height: 4),
                                 Text(
                                   hasFace 
-                                      ? 'You can use advanced multi-step face recognition for secure attendance'
-                                      : 'Set up multi-step face recognition for ultra-secure attendance',
+                                      ? 'Advanced multi-step face recognition is active'
+                                      : 'Setup multi-step face recognition for secure attendance',
                                   style: TextStyle(
                                     fontSize: 14,
                                     color: hasFace ? Colors.green.shade600 : Colors.orange.shade600,
@@ -630,25 +792,31 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                       ),
                       
                       if (hasFace) ...[
-                        const SizedBox(height: 16),
+                        const SizedBox(height: 20),
                         Container(
-                          padding: const EdgeInsets.all(12),
+                          padding: const EdgeInsets.all(16),
                           decoration: BoxDecoration(
                             color: Colors.blue.shade50,
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: Colors.blue.shade200),
                           ),
                           child: Column(
                             children: [
-                              const Text(
-                                '🔥 Multi-Step Features Enabled:',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue,
-                                ),
+                              Row(
+                                children: [
+                                  Icon(Icons.auto_awesome, color: Colors.blue.shade600, size: 20),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Multi-Step Features Active:',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue.shade700,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 12),
                               const Row(
                                 children: [
                                   Icon(Icons.check_circle, size: 16, color: Colors.green),
@@ -656,7 +824,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                                   Expanded(child: Text('6-step pose verification', style: TextStyle(fontSize: 12))),
                                 ],
                               ),
-                              const SizedBox(height: 4),
+                              const SizedBox(height: 6),
                               const Row(
                                 children: [
                                   Icon(Icons.check_circle, size: 16, color: Colors.green),
@@ -664,7 +832,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                                   Expanded(child: Text('Advanced anti-spoofing protection', style: TextStyle(fontSize: 12))),
                                 ],
                               ),
-                              const SizedBox(height: 4),
+                              const SizedBox(height: 6),
                               const Row(
                                 children: [
                                   Icon(Icons.check_circle, size: 16, color: Colors.green),
@@ -672,21 +840,54 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
                                   Expanded(child: Text('Real-time quality assessment', style: TextStyle(fontSize: 12))),
                                 ],
                               ),
+                              const SizedBox(height: 6),
+                              const Row(
+                                children: [
+                                  Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                  SizedBox(width: 8),
+                                  Expanded(child: Text('Ultra-secure attendance recording', style: TextStyle(fontSize: 12))),
+                                ],
+                              ),
                             ],
                           ),
                         ),
                       ] else ...[
-                        const SizedBox(height: 16),
-                        SizedBox(
+                        const SizedBox(height: 20),
+                        Container(
                           width: double.infinity,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Colors.orange.shade400, Colors.orange.shade600],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.orange.withOpacity(0.3),
+                                blurRadius: 8,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
                           child: ElevatedButton.icon(
                             onPressed: _isCheckingIn ? null : _setupMultiStepFaceRecognition,
-                            icon: const Icon(Icons.face_6, size: 20),
-                            label: const Text('Setup Multi-Step Face Recognition'),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.orange.shade400,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              backgroundColor: Colors.transparent,
+                              shadowColor: Colors.transparent,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            icon: const Icon(Icons.face_6, size: 22, color: Colors.white),
+                            label: const Text(
+                              'Setup Multi-Step Face Recognition',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
                             ),
                           ),
                         ),
@@ -725,19 +926,30 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
     }
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: statusColor.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: statusColor.withOpacity(0.3)),
+        gradient: LinearGradient(
+          colors: [statusColor.withOpacity(0.1), statusColor.withOpacity(0.2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: statusColor.withOpacity(0.3), width: 2),
       ),
       child: Column(
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(statusIcon, color: statusColor, size: 32),
-              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: statusColor.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(statusIcon, color: statusColor, size: 32),
+              ),
+              const SizedBox(width: 16),
               Text(
                 statusText,
                 style: TextStyle(
@@ -748,40 +960,46 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           Text(
             'Checked in at: ${_formatDateTime(record.checkInTime)}',
             style: const TextStyle(
-              fontSize: 14,
+              fontSize: 16,
               fontWeight: FontWeight.w500,
             ),
           ),
-          if (record.hasFaceMatch)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.blue.shade100,
-                  borderRadius: BorderRadius.circular(12),
+          if (record.hasFaceMatch) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.blue.shade100, Colors.blue.shade200],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.face_6, size: 16, color: Colors.blue.shade700),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Verified with Multi-Step Face Recognition',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.blue.shade700,
-                        fontWeight: FontWeight.w500,
-                      ),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.blue.shade300),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.face_6, size: 18, color: Colors.blue.shade700),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Verified with Multi-Step Face Recognition',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.blue.shade700,
+                      fontWeight: FontWeight.w600,
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(Icons.verified, size: 16, color: Colors.blue.shade700),
+                ],
               ),
             ),
+          ],
         ],
       ),
     );
@@ -789,10 +1007,14 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
 
   Widget _buildTimeInfoChip(String label, String value, Color color) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
+        gradient: LinearGradient(
+          colors: [color.withOpacity(0.1), color.withOpacity(0.2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Column(
@@ -804,8 +1026,9 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               color: color,
               fontWeight: FontWeight.bold,
             ),
+            textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Text(
             value,
             style: TextStyle(
@@ -813,6 +1036,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
               fontWeight: FontWeight.bold,
               color: color,
             ),
+            textAlign: TextAlign.center,
           ),
         ],
       ),
@@ -821,54 +1045,106 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
 
   Widget _buildAttendanceHistoryCard() {
     return Card(
+      elevation: 3,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Attendance History',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
+            const Row(
+              children: [
+                Icon(Icons.history, color: Colors.indigo, size: 24),
+                SizedBox(width: 12),
+                Text(
+                  'Attendance History',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.indigo,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             
             if (_myAttendanceHistory.isEmpty)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(32),
+              Container(
+                padding: const EdgeInsets.all(40),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Center(
                   child: Column(
                     children: [
-                      Icon(Icons.history, size: 48, color: Colors.grey),
+                      Icon(Icons.history_outlined, size: 48, color: Colors.grey),
                       SizedBox(height: 16),
                       Text(
                         'No attendance history yet',
-                        style: TextStyle(color: Colors.grey),
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Your attendance records will appear here',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 14,
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ],
                   ),
                 ),
               )
             else
-              ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: _myAttendanceHistory.length > 5 ? 5 : _myAttendanceHistory.length,
-                separatorBuilder: (context, index) => const Divider(),
-                itemBuilder: (context, index) {
-                  final record = _myAttendanceHistory[index];
-                  return _buildHistoryTile(record);
-                },
-              ),
-            
-            if (_myAttendanceHistory.length > 5)
-              TextButton(
-                onPressed: () {
-                  // TODO: Navigate to full history page
-                },
-                child: const Text('View All History'),
+              Column(
+                children: [
+                  ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _myAttendanceHistory.length > 5 ? 5 : _myAttendanceHistory.length,
+                    separatorBuilder: (context, index) => Divider(
+                      color: Colors.grey.shade200,
+                      thickness: 1,
+                    ),
+                    itemBuilder: (context, index) {
+                      final record = _myAttendanceHistory[index];
+                      return _buildHistoryTile(record);
+                    },
+                  ),
+                  
+                  if (_myAttendanceHistory.length > 5) ...[
+                    const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Colors.indigo.shade100, Colors.indigo.shade200],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: TextButton.icon(
+                        onPressed: () {
+                          // TODO: Navigate to full history page
+                        },
+                        icon: Icon(Icons.view_list, color: Colors.indigo.shade700),
+                        label: Text(
+                          'View All History (${_myAttendanceHistory.length} records)',
+                          style: TextStyle(
+                            color: Colors.indigo.shade700,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
           ],
         ),
@@ -898,46 +1174,76 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
         statusIcon = Icons.help;
     }
 
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
-      leading: Icon(statusIcon, color: statusColor),
-      title: Text(
-        _formatDate(record.checkInTime),
-        style: const TextStyle(fontWeight: FontWeight.w500),
-      ),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(_formatTime(record.checkInTime)),
-          if (record.hasFaceMatch)
-            Row(
-              children: [
-                Icon(Icons.face_6, size: 12, color: Colors.blue.shade600),
-                const SizedBox(width: 4),
-                Text(
-                  'Multi-Step Face Recognition',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.blue.shade600,
-                  ),
-                ),
-              ],
-            ),
-        ],
-      ),
-      trailing: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: statusColor,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Text(
-          record.status.toUpperCase(),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        leading: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: statusColor.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(12),
           ),
+          child: Icon(statusIcon, color: statusColor, size: 24),
+        ),
+        title: Row(
+          children: [
+            Text(
+              _formatDate(record.checkInTime),
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 16,
+              ),
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: statusColor,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                record.status.toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(
+              'Time: ${_formatTime(record.checkInTime)}',
+              style: TextStyle(
+                color: Colors.grey.shade600,
+                fontSize: 14,
+              ),
+            ),
+            if (record.hasFaceMatch) ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Icon(Icons.face_6, size: 14, color: Colors.blue.shade600),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Multi-Step Face Recognition',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.blue.shade600,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(Icons.verified, size: 12, color: Colors.blue.shade600),
+                ],
+              ),
+            ],
+          ],
         ),
       ),
     );
