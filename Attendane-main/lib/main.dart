@@ -14,13 +14,13 @@ void main() async {
 Future<void> _initializeApp() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Configure system UI
+  
   await _configureSystemUI();
   
-  // Initialize Supabase
+  
   await _initializeSupabase();
   
-  // Setup service locator
+ 
   setupServiceLocator();
 }
 
