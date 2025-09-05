@@ -163,7 +163,7 @@ class _UpdatedProfileState extends State<UpdatedProfile> {
               debugPrint('🔄 Processing multi-step face images...');
             } catch (e) {
               debugPrint('❌ Error processing multi-step face images: $e');
-              throw e;
+              rethrow;
             }
           },
         ),

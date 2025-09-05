@@ -2,8 +2,6 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:myproject2/data/models/user_model.dart';
-import 'package:myproject2/data/models/class_model.dart';
 import 'package:myproject2/data/services/unified_face_service.dart';
 import 'dart:math' as Math;
 

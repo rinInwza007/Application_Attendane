@@ -80,7 +80,7 @@ class _MultiStepFaceCaptureScreenState extends State<MultiStepFaceCaptureScreen>
   
   // Multi-step capture
   int _currentStepIndex = 0;
-  List<String> _capturedImages = [];
+  final List<String> _capturedImages = [];
   List<FaceCaptureStep> _captureSteps = [];
   
   // Timing
@@ -285,7 +285,7 @@ class _MultiStepFaceCaptureScreenState extends State<MultiStepFaceCaptureScreen>
       }
     } catch (e) {
       print('❌ Error initializing camera: $e');
-      throw e;
+      rethrow;
     }
   }
 
@@ -1066,7 +1066,7 @@ class _MultiStepFaceCaptureScreenState extends State<MultiStepFaceCaptureScreen>
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Container(
+        SizedBox(
           width: 80,
           height: 80,
           child: CircularProgressIndicator(

@@ -255,7 +255,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
 
     } catch (e) {
       print('❌ Error in AuthService face recognition: $e');
-      throw e;
+      rethrow;
     }
   }
 
@@ -386,7 +386,7 @@ class _UpdatedStudentAttendanceScreenState extends State<UpdatedStudentAttendanc
       print('✅ Multi-step face embedding saved successfully');
     } catch (e) {
       print('❌ Error saving face embedding: $e');
-      throw e;
+      rethrow;
     }
   }
 

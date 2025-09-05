@@ -107,7 +107,7 @@ class _InputDataPageState extends State<InputDataPage> {
                 // await _processFaceImages(imagePaths);
               } catch (e) {
                 print('❌ Error processing face images: $e');
-                throw e;
+                rethrow;
               }
             },
           ),
