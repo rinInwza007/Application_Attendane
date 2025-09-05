@@ -21,7 +21,7 @@ Future<void> _initializeApp() async {
   await _initializeSupabase();
   
  
-  setupServiceLocator();
+ // setupServiceLocator();
 }
 
 Future<void> _configureSystemUI() async {
