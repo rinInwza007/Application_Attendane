@@ -27,7 +27,7 @@ class _FaceEnrollmentScreenState extends State<FaceEnrollmentScreen> {
   bool _isCameraInitialized = false;
   
   // Face images
-  List<String> _capturedImages = [];
+  final List<String> _capturedImages = [];
   final int _requiredImages = 3; // จำนวนรูปที่ต้องการ
   
   // State management

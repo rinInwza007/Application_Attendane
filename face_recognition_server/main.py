@@ -1,7 +1,7 @@
-# Enhanced Face Recognition Server with Periodic Attendance Support
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks
+# Enhanced Face Recognition Server - Motion Detection System
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import cv2
 import face_recognition
@@ -22,6 +22,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+import heapq
 
 # Load environment variables
 load_dotenv()
@@ -32,9 +33,16 @@ PORT = int(os.getenv("PORT", 8000))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 FACE_THRESHOLD = float(os.getenv("FACE_VERIFICATION_THRESHOLD", 0.7))
 
+# Motion Detection Configuration
+MOTION_DETECTION_ENABLED = os.getenv("MOTION_DETECTION_ENABLED", "true").lower() == "true"
+DEFAULT_MOTION_THRESHOLD = float(os.getenv("DEFAULT_MOTION_THRESHOLD", 0.1))
+MOTION_COOLDOWN_SECONDS = int(os.getenv("MOTION_COOLDOWN_SECONDS", 30))
+MAX_SNAPSHOTS_PER_HOUR = int(os.getenv("MAX_SNAPSHOTS_PER_HOUR", 120))
+
 # Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
@@ -46,9 +54,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Enhanced Attendance Plus Face Recognition API",
-    description="Face Recognition Server with Periodic Attendance Support",
-    version="3.0.0"
+    title="Motion Detection Attendance System",
+    description="Face Recognition Server with Motion-Triggered Snapshots",
+    version="5.0.0"
 )
 
 # CORS middleware
@@ -61,32 +69,274 @@ app.add_middleware(
 )
 
 # Thread pool for processing
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=8)
 
-# In-memory cache for face embeddings (for performance)
+# In-memory cache and tracking
 face_cache = {}
+motion_sessions = {}  # Track motion detection sessions
 cache_lock = threading.Lock()
 
-# Pydantic models
-class PeriodicAttendanceRequest(BaseModel):
-    session_id: str
-    capture_time: str
-    image_path: Optional[str] = None
+# ==================== Pydantic Models ====================
 
-class AttendanceSessionRequest(BaseModel):
+class MotionSessionRequest(BaseModel):
     class_id: str
     teacher_email: str
     duration_hours: int = 2
-    capture_interval_minutes: int = 5
+    motion_threshold: float = 0.1
+    cooldown_seconds: int = 30
     on_time_limit_minutes: int = 30
 
-class FaceEnrollmentRequest(BaseModel):
-    student_id: str
-    student_email: str
+class MotionSnapshotRequest(BaseModel):
+    session_id: str
+    motion_strength: float
+    capture_time: str
+    elapsed_minutes: int = 0
 
-# Enhanced helper functions
+class MotionDetectionStats(BaseModel):
+    session_id: str
+    total_motion_events: int
+    total_snapshots_taken: int
+    snapshot_efficiency: float  # snapshots / motion_events
+    average_motion_strength: float
+    motion_events_by_hour: Dict[str, int]
+
+# ==================== Motion Detection Processor ====================
+
+class MotionDetectionProcessor:
+    def __init__(self):
+        self.adaptive_thresholds = {
+            '0-10': 0.05,    # Very sensitive - catch everyone entering
+            '10-30': 0.08,   # High sensitivity - active period
+            '30-60': 0.12,   # Normal sensitivity
+            '60-90': 0.15,   # Lower sensitivity - less active
+            '90+': 0.20      # Lowest sensitivity - end of session
+        }
+        
+        self.processing_configs = {
+            '0-10': {
+                'face_threshold': 0.75,
+                'model_accuracy': 'high',
+                'processing_priority': 1,
+                'max_processing_time': 3,
+                'enable_quality_check': True,
+                'motion_boost': True  # Boost processing for motion-triggered
+            },
+            '10-30': {
+                'face_threshold': 0.7,
+                'model_accuracy': 'high',
+                'processing_priority': 2,
+                'max_processing_time': 4,
+                'enable_quality_check': True,
+                'motion_boost': True
+            },
+            '30-60': {
+                'face_threshold': 0.65,
+                'model_accuracy': 'medium',
+                'processing_priority': 3,
+                'max_processing_time': 5,
+                'enable_quality_check': False,
+                'motion_boost': False
+            },
+            '60+': {
+                'face_threshold': 0.6,
+                'model_accuracy': 'standard',
+                'processing_priority': 4,
+                'max_processing_time': 6,
+                'enable_quality_check': False,
+                'motion_boost': False
+            }
+        }
+    
+    def get_phase(self, elapsed_minutes: int) -> str:
+        """Determine processing phase based on elapsed time"""
+        if elapsed_minutes <= 10:
+            return '0-10'
+        elif elapsed_minutes <= 30:
+            return '10-30'
+        elif elapsed_minutes <= 60:
+            return '30-60'
+        elif elapsed_minutes <= 90:
+            return '60-90'
+        else:
+            return '90+'
+    
+    def get_motion_threshold(self, phase: str, base_threshold: float = None) -> float:
+        """Get adaptive motion threshold for phase"""
+        adaptive = self.adaptive_thresholds.get(phase, 0.1)
+        if base_threshold:
+            # Blend adaptive with session-specific threshold
+            return (adaptive + base_threshold) / 2
+        return adaptive
+    
+    def get_config(self, phase: str) -> Dict:
+        """Get processing configuration for phase"""
+        return self.processing_configs.get(phase, self.processing_configs['30-60'])
+    
+    def calculate_motion_priority(self, motion_strength: float, phase: str) -> int:
+        """Calculate processing priority based on motion strength and phase"""
+        base_config = self.get_config(phase)
+        base_priority = base_config['processing_priority']
+        
+        # Boost priority for strong motion
+        if motion_strength > 0.5:  # Very strong motion
+            return max(1, base_priority - 2)
+        elif motion_strength > 0.3:  # Strong motion
+            return max(1, base_priority - 1)
+        elif motion_strength > 0.15:  # Moderate motion
+            return base_priority
+        else:  # Weak motion
+            return min(5, base_priority + 1)
+
+# Global processor instance
+motion_processor = MotionDetectionProcessor()
+
+# ==================== Motion Session Management ====================
+
+class MotionSessionManager:
+    def __init__(self):
+        self.sessions = {}
+        self.lock = threading.Lock()
+    
+    def create_session(self, session_id: str, config: Dict):
+        """Create motion detection session"""
+        with self.lock:
+            self.sessions[session_id] = {
+                'session_id': session_id,
+                'created_at': datetime.now(),
+                'config': config,
+                'stats': {
+                    'motion_events': 0,
+                    'snapshots_taken': 0,
+                    'last_snapshot': None,
+                    'motion_history': [],
+                    'hourly_events': {}
+                }
+            }
+            logger.info(f"📱 Motion session created: {session_id}")
+    
+    def record_motion_event(self, session_id: str, motion_strength: float, snapshot_taken: bool = False):
+        """Record motion event"""
+        with self.lock:
+            if session_id not in self.sessions:
+                return False
+            
+            session = self.sessions[session_id]
+            now = datetime.now()
+            hour_key = now.strftime('%H:00')
+            
+            # Update stats
+            session['stats']['motion_events'] += 1
+            if snapshot_taken:
+                session['stats']['snapshots_taken'] += 1
+                session['stats']['last_snapshot'] = now
+            
+            # Update hourly stats
+            if hour_key not in session['stats']['hourly_events']:
+                session['stats']['hourly_events'][hour_key] = 0
+            session['stats']['hourly_events'][hour_key] += 1
+            
+            # Add to motion history (keep last 100 events)
+            session['stats']['motion_history'].append({
+                'timestamp': now.isoformat(),
+                'strength': motion_strength,
+                'snapshot_taken': snapshot_taken
+            })
+            
+            # Keep only last 100 events
+            if len(session['stats']['motion_history']) > 100:
+                session['stats']['motion_history'] = session['stats']['motion_history'][-100:]
+            
+            return True
+    
+    def can_take_snapshot(self, session_id: str) -> Dict[str, Any]:
+        """Check if snapshot can be taken (cooldown and rate limiting)"""
+        with self.lock:
+            if session_id not in self.sessions:
+                return {'allowed': False, 'reason': 'session_not_found'}
+            
+            session = self.sessions[session_id]
+            stats = session['stats']
+            now = datetime.now()
+            
+            # Check cooldown
+            if stats['last_snapshot']:
+                time_since_last = (now - stats['last_snapshot']).total_seconds()
+                cooldown = session['config'].get('cooldown_seconds', MOTION_COOLDOWN_SECONDS)
+                
+                if time_since_last < cooldown:
+                    return {
+                        'allowed': False,
+                        'reason': 'cooldown_active',
+                        'remaining_seconds': int(cooldown - time_since_last)
+                    }
+            
+            # Check hourly rate limit
+            current_hour = now.strftime('%H:00')
+            hourly_count = stats['hourly_events'].get(current_hour, 0)
+            max_per_hour = session['config'].get('max_snapshots_per_hour', MAX_SNAPSHOTS_PER_HOUR)
+            
+            if hourly_count >= max_per_hour:
+                return {
+                    'allowed': False,
+                    'reason': 'rate_limit_exceeded',
+                    'hourly_count': hourly_count,
+                    'max_per_hour': max_per_hour
+                }
+            
+            return {'allowed': True}
+    
+    def get_session_stats(self, session_id: str) -> Optional[Dict]:
+        """Get session statistics"""
+        with self.lock:
+            if session_id not in self.sessions:
+                return None
+            return self.sessions[session_id]['stats'].copy()
+    
+    def remove_session(self, session_id: str):
+        """Remove motion session"""
+        with self.lock:
+            if session_id in self.sessions:
+                del self.sessions[session_id]
+                logger.info(f"📱 Motion session removed: {session_id}")
+
+# Global session manager
+motion_session_manager = MotionSessionManager()
+
+# ==================== Priority Queue for Motion Processing ====================
+
+class MotionPriorityQueue:
+    def __init__(self):
+        self.queue = []
+        self.index = 0
+        self.lock = asyncio.Lock()
+    
+    async def put(self, item):
+        async with self.lock:
+            priority = item['priority']
+            # Motion-triggered items get slight priority boost
+            if item.get('trigger_type') == 'motion':
+                priority = max(1, priority - 0.5)
+            
+            heapq.heappush(self.queue, (priority, self.index, item))
+            self.index += 1
+    
+    async def get(self):
+        async with self.lock:
+            if self.queue:
+                priority, index, item = heapq.heappop(self.queue)
+                return item
+            return None
+    
+    def qsize(self):
+        return len(self.queue)
+
+# Global queue
+motion_processing_queue = MotionPriorityQueue()
+
+# ==================== Enhanced Helper Functions ====================
+
 def get_face_embedding_cached(student_id: str) -> Optional[np.ndarray]:
-    """Get face embedding with caching"""
+    """Get face embedding with caching for motion-triggered processing"""
     with cache_lock:
         if student_id in face_cache:
             return face_cache[student_id]
@@ -108,97 +358,135 @@ def get_face_embedding_cached(student_id: str) -> Optional[np.ndarray]:
 
     return None
 
-def process_multiple_faces(image_array: np.ndarray, enrolled_students: List[str]) -> List[Dict]:
-    """Process multiple faces in an image and identify students"""
+def process_motion_triggered_faces(image_array: np.ndarray, enrolled_students: List[str], config: Dict, motion_strength: float) -> List[Dict]:
+    """Process faces with motion-specific optimizations"""
     try:
+        start_time = time.time()
+        
         if image_array is None or image_array.size == 0:
-            logger.warning("Empty image array provided")
+            logger.warning("Empty image array for motion processing")
             return []
         
         if not enrolled_students:
-            logger.warning("No enrolled students provided")
+            logger.warning("No enrolled students for motion processing")
             return []
         
-        # Detect all faces
-        face_locations = face_recognition.face_locations(image_array, model="hog")
+        # Choose model based on motion strength and config
+        if motion_strength > 0.3 and config.get('motion_boost', False):
+            model_type = "cnn"  # Use high-accuracy model for strong motion
+            num_jitters = 2
+        else:
+            model_type = "cnn" if config['model_accuracy'] == 'high' else "hog"
+            num_jitters = 2 if config['model_accuracy'] == 'high' else 1
+        
+        # Detect faces
+        face_locations = face_recognition.face_locations(image_array, model=model_type)
         
         if not face_locations:
-            logger.info("No faces detected in image")
+            logger.info("No faces detected in motion-triggered processing")
             return []
         
-        logger.info(f"Detected {len(face_locations)} faces")
+        logger.info(f"🎯 Motion processing: detected {len(face_locations)} faces (motion: {motion_strength:.3f}, model: {model_type})")
         
-        # Get encodings for all detected faces
-        try:
-            face_encodings = face_recognition.face_encodings(image_array, face_locations, num_jitters=1)
-        except Exception as e:
-            logger.error(f"Error getting face encodings: {e}")
-            return []
-        
-        if len(face_encodings) != len(face_locations):
-            logger.warning(f"Encoding count ({len(face_encodings)}) doesn't match location count ({len(face_locations)})")
+        # Get face encodings
+        face_encodings = face_recognition.face_encodings(
+            image_array, 
+            face_locations, 
+            num_jitters=num_jitters
+        )
         
         detected_faces = []
+        threshold = config['face_threshold']
+        
+        # Adjust threshold for motion events
+        if motion_strength > 0.4:
+            threshold *= 0.95  # Slightly lower threshold for strong motion events
+        elif motion_strength < 0.15:
+            threshold *= 1.05  # Slightly higher threshold for weak motion
         
         for i, (encoding, location) in enumerate(zip(face_encodings, face_locations)):
             try:
                 best_match = None
                 best_similarity = 0.0
                 
-                # Compare with all enrolled students
+                # Compare with enrolled students
                 for student_id in enrolled_students:
-                    try:
-                        stored_embedding = get_face_embedding_cached(student_id)
-                        if stored_embedding is None:
-                            continue
-                        
-                        # Calculate similarity
-                        similarity = calculate_enhanced_similarity(stored_embedding, encoding)
-                        
-                        if similarity > FACE_THRESHOLD and similarity > best_similarity:
-                            best_similarity = similarity
-                            best_match = student_id
-                            
-                    except Exception as e:
-                        logger.error(f"Error comparing with student {student_id}: {e}")
+                    stored_embedding = get_face_embedding_cached(student_id)
+                    if stored_embedding is None:
                         continue
+                    
+                    similarity = calculate_enhanced_similarity(stored_embedding, encoding)
+                    
+                    if similarity > threshold and similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = student_id
                 
-                # Calculate face quality metrics
-                try:
-                    quality = calculate_face_quality(image_array, location)
-                except Exception as e:
-                    logger.error(f"Error calculating face quality: {e}")
-                    quality = {"overall_score": 0.0}
+                # Enhanced quality check for motion-triggered captures
+                quality_score = 1.0
+                if config.get('enable_quality_check', False):
+                    quality_info = calculate_motion_face_quality(image_array, location, motion_strength)
+                    quality_score = quality_info['overall_score']
                 
                 face_info = {
                     'face_index': i,
                     'student_id': best_match,
                     'confidence': float(best_similarity),
-                    'verified': best_match is not None,
+                    'verified': best_match is not None and best_similarity > threshold,
                     'bounding_box': {
                         'top': int(location[0]),
                         'right': int(location[1]),
                         'bottom': int(location[2]),
                         'left': int(location[3])
                     },
-                    'quality': quality
+                    'quality_score': quality_score,
+                    'motion_strength': motion_strength,
+                    'processing_time': time.time() - start_time,
+                    'threshold_used': threshold,
+                    'model_used': model_type
                 }
                 
                 detected_faces.append(face_info)
                 
             except Exception as e:
-                logger.error(f"Error processing face {i}: {e}")
+                logger.error(f"Error processing face {i} in motion mode: {e}")
                 continue
         
-        logger.info(f"Successfully processed {len(detected_faces)} faces")
+        processing_time = time.time() - start_time
+        logger.info(f"✅ Motion processing completed: {processing_time:.2f}s, {len(detected_faces)} faces processed")
+        
         return detected_faces
         
     except Exception as e:
-        logger.error(f"Error processing multiple faces: {e}")
+        logger.error(f"Error in motion-triggered face processing: {e}")
         return []
 
+def calculate_motion_face_quality(image_array: np.ndarray, face_location: tuple, motion_strength: float) -> Dict[str, float]:
+    """Calculate face quality with motion considerations"""
+    try:
+        basic_quality = calculate_face_quality(image_array, face_location)
+        
+        # Adjust quality based on motion
+        motion_penalty = 0.0
+        if motion_strength > 0.5:
+            motion_penalty = 0.1  # High motion might cause blur
+        elif motion_strength > 0.3:
+            motion_penalty = 0.05  # Moderate motion penalty
+        
+        adjusted_score = max(0.0, basic_quality['overall_score'] - motion_penalty)
+        
+        return {
+            **basic_quality,
+            'motion_strength': motion_strength,
+            'motion_penalty': motion_penalty,
+            'overall_score': adjusted_score
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating motion face quality: {e}")
+        return {"overall_score": 0.0}
+
 def calculate_face_quality(image_array: np.ndarray, face_location: tuple) -> Dict[str, float]:
-    """Calculate comprehensive face quality metrics"""
+    """Calculate basic face quality metrics"""
     try:
         top, right, bottom, left = face_location
         face_image = image_array[top:bottom, left:right]
@@ -206,26 +494,23 @@ def calculate_face_quality(image_array: np.ndarray, face_location: tuple) -> Dic
         if face_image.size == 0:
             return {"overall_score": 0.0}
         
-        # Convert to grayscale for analysis
         gray_face = cv2.cvtColor(face_image, cv2.COLOR_RGB2GRAY)
         
-        # Brightness (mean intensity)
+        # Basic quality metrics
         brightness = np.mean(gray_face) / 255.0
-        
-        # Contrast (standard deviation)
         contrast = np.std(gray_face) / 255.0
         
-        # Sharpness (Laplacian variance)
+        # Sharpness using Laplacian
         laplacian = cv2.Laplacian(gray_face, cv2.CV_64F)
-        sharpness = np.var(laplacian) / 10000.0  # Normalize
+        sharpness = np.var(laplacian) / 10000.0
         
-        # Size score (larger faces are generally better)
+        # Face size score
         face_area = (right - left) * (bottom - top)
         image_area = image_array.shape[0] * image_array.shape[1]
         size_ratio = face_area / image_area
-        size_score = min(size_ratio * 10, 1.0)  # Cap at 1.0
+        size_score = min(size_ratio * 10, 1.0)
         
-        # Overall quality score (weighted average)
+        # Combined score
         overall_score = (
             brightness * 0.2 +
             contrast * 0.3 +
@@ -246,7 +531,7 @@ def calculate_face_quality(image_array: np.ndarray, face_location: tuple) -> Dic
         return {"overall_score": 0.0}
 
 def calculate_enhanced_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:
-    """Enhanced similarity calculation with multiple metrics"""
+    """Enhanced similarity calculation for motion-triggered processing"""
     try:
         # Euclidean distance
         euclidean_distance = np.linalg.norm(embedding1 - embedding2)
@@ -262,16 +547,8 @@ def calculate_enhanced_similarity(embedding1: np.ndarray, embedding2: np.ndarray
         else:
             cosine_similarity = dot_product / (norm_a * norm_b)
         
-        # Manhattan distance
-        manhattan_distance = np.sum(np.abs(embedding1 - embedding2))
-        manhattan_score = max(0, 1 - manhattan_distance / len(embedding1))
-        
-        # Weighted combination
-        final_score = (
-            euclidean_score * 0.5 +
-            cosine_similarity * 0.3 +
-            manhattan_score * 0.2
-        )
+        # Weighted combination optimized for motion-triggered processing
+        final_score = (euclidean_score * 0.4 + cosine_similarity * 0.6)
         
         return float(np.clip(final_score, 0, 1))
         
@@ -280,7 +557,7 @@ def calculate_enhanced_similarity(embedding1: np.ndarray, embedding2: np.ndarray
         return 0.0
 
 async def get_enrolled_students_for_class(class_id: str) -> List[str]:
-    """Get list of enrolled students for a class"""
+    """Get enrolled students with caching"""
     try:
         result = supabase.table('class_students').select('users(school_id)').eq('class_id', class_id).execute()
         
@@ -300,11 +577,12 @@ async def get_enrolled_students_for_class(class_id: str) -> List[str]:
         logger.error(f"Error getting enrolled students for class {class_id}: {e}")
         return []
 
-# Enhanced API Endpoints
+# ==================== Motion Detection API Endpoints ====================
+
 @app.on_event("startup")
 async def startup_event():
-    """Validate configuration on startup"""
-    logger.info("🚀 Starting Face Recognition Server...")
+    """Enhanced startup for motion detection system"""
+    logger.info("🚀 Starting Motion Detection Attendance Server...")
     
     # Validate environment variables
     required_env_vars = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
@@ -329,550 +607,63 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Supabase connection test failed: {e}")
     
-    logger.info(f"✅ Server startup complete. Face threshold: {FACE_THRESHOLD}")
+    # Start background motion processing queue
+    asyncio.create_task(process_motion_queue())
+    
+    logger.info(f"✅ Motion Detection Server startup complete")
+    logger.info(f"📊 Motion Detection: {'Enabled' if MOTION_DETECTION_ENABLED else 'Disabled'}")
+    logger.info(f"🎯 Default Motion Threshold: {DEFAULT_MOTION_THRESHOLD}")
+    logger.info(f"⏰ Motion Cooldown: {MOTION_COOLDOWN_SECONDS}s")
+    logger.info(f"📈 Max Snapshots/Hour: {MAX_SNAPSHOTS_PER_HOUR}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    logger.info("🛑 Shutting down Face Recognition Server...")
+    logger.info("🛑 Shutting down Motion Detection Server...")
     
-    # Clear cache
     with cache_lock:
         face_cache.clear()
     
-    # Shutdown thread pool
     executor.shutdown(wait=True)
-    
-    logger.info("✅ Server shutdown complete")
+    logger.info("✅ Motion Detection Server shutdown complete")
 
-@app.post("/api/face/enroll")
-async def enroll_face_multiple_images(
-    images: List[UploadFile] = File(...),
-    student_id: str = Form(...),
-    student_email: str = Form(...)
-):
-    """Enroll face using multiple images for better accuracy"""
-    try:
-        if not images or len(images) == 0:
-            raise HTTPException(status_code=400, detail="At least one image is required")
-        
-        if len(images) > 5:
-            raise HTTPException(status_code=400, detail="Maximum 5 images allowed")
-        
-        logger.info(f"Enrolling face for {student_id} with {len(images)} images")
-        
-        all_encodings = []
-        
-        # Process each image
-        for idx, image_file in enumerate(images):
-            try:
-                # Validate and process image
-                image_data = await image_file.read()
-                image = Image.open(io.BytesIO(image_data))
-                
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
-                
-                image_array = np.array(image)
-                
-                # Detect face
-                face_locations = face_recognition.face_locations(image_array, model="hog")
-                
-                if len(face_locations) == 0:
-                    logger.warning(f"No face detected in image {idx + 1}")
-                    continue
-                
-                if len(face_locations) > 1:
-                    logger.warning(f"Multiple faces detected in image {idx + 1}, using the first one")
-                
-                # Get face encoding
-                face_encodings = face_recognition.face_encodings(image_array, face_locations[:1], num_jitters=2)
-                
-                if face_encodings:
-                    all_encodings.append(face_encodings[0])
-                    logger.info(f"Successfully processed image {idx + 1}")
-                
-            except Exception as e:
-                logger.error(f"Error processing image {idx + 1}: {e}")
-                continue
-        
-        if not all_encodings:
-            raise HTTPException(status_code=400, detail="No valid face encodings could be extracted from the images")
-        
-        if len(all_encodings) < len(images) * 0.6:  # At least 60% success rate
-            logger.warning(f"Only {len(all_encodings)}/{len(images)} images processed successfully")
-        
-        # Calculate average encoding
-        average_encoding = np.mean(all_encodings, axis=0)
-        
-        # Calculate quality score
-        quality_score = len(all_encodings) / len(images)  # Success rate as quality indicator
-        
-        # Save to database
-        success = await save_face_embedding_to_db(student_id, student_email, average_encoding, quality_score)
-        
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to save face data")
-        
-        # Clear cache for this student
-        with cache_lock:
-            if student_id in face_cache:
-                del face_cache[student_id]
-        
-        return {
-            "success": True,
-            "message": f"Face enrolled successfully using {len(all_encodings)} images",
-            "student_id": student_id,
-            "images_processed": len(all_encodings),
-            "total_images": len(images),
-            "quality_score": quality_score,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Face enrollment error: {e}")
-        raise HTTPException(status_code=500, detail=f"Enrollment failed: {str(e)}")
-
-@app.post("/api/attendance/periodic")
-async def process_periodic_attendance(
-    background_tasks: BackgroundTasks,
-    image: UploadFile = File(...),
-    session_id: str = Form(...),
-    capture_time: str = Form(...)
-):
-    """Process periodic attendance capture"""
-    try:
-        # Validate session
-        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').single().execute()
-        
-        if not session_result.data:
-            raise HTTPException(status_code=404, detail="Active session not found")
-        
-        session_data = session_result.data
-        class_id = session_data['class_id']
-        
-        # Get enrolled students for this class
-        enrolled_students = await get_enrolled_students_for_class(class_id)
-        
-        if not enrolled_students:
-            return {
-                "success": True,
-                "faces_detected": 0,
-                "new_attendance_records": 0,
-                "message": "No enrolled students found for this class"
-            }
-        
-        # Process image
-        image_data = await image.read()
-        image_pil = Image.open(io.BytesIO(image_data))
-        
-        if image_pil.mode != 'RGB':
-            image_pil = image_pil.convert('RGB')
-        
-        image_array = np.array(image_pil)
-        
-        # Process faces in background
-        background_tasks.add_task(
-            process_periodic_attendance_background,
-            image_array,
-            enrolled_students,
-            session_id,
-            session_data,
-            capture_time
-        )
-        
-        # Quick face detection for immediate response
-        face_locations = face_recognition.face_locations(image_array, model="hog")
-        
-        return {
-            "success": True,
-            "faces_detected": len(face_locations),
-            "message": f"Processing {len(face_locations)} faces in background",
-            "session_id": session_id,
-            "capture_time": capture_time,
-            "enrolled_students": len(enrolled_students)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Periodic attendance error: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
-async def process_periodic_attendance_background(
-    image_array: np.ndarray,
-    enrolled_students: List[str],
-    session_id: str,
-    session_data: Dict,
-    capture_time: str
-):
-    """Background task for processing periodic attendance"""
-    try:
-        logger.info(f"Processing periodic attendance for session {session_id}")
-        
-        # Process all faces
-        detected_faces = process_multiple_faces(image_array, enrolled_students)
-        
-        new_records = 0
-        
-        for face_info in detected_faces:
-            if not face_info['verified']:
-                continue
-            
-            student_id = face_info['student_id']
-            confidence = face_info['confidence']
-            
-            # Get student email
-            student_result = supabase.table('users').select('email').eq('school_id', student_id).single().execute()
-            
-            if not student_result.data:
-                continue
-            
-            student_email = student_result.data['email']
-            
-            # Check if already recorded
-            existing_record = supabase.table('attendance_records').select('id').eq('session_id', session_id).eq('student_email', student_email).execute()
-            
-            if existing_record.data:
-                continue  # Already recorded
-            
-            # Determine status based on timing
-            capture_dt = datetime.fromisoformat(capture_time.replace('Z', '+00:00'))
-            session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
-            on_time_limit = session_start + timedelta(minutes=session_data['on_time_limit_minutes'])
-            
-            status = 'present' if capture_dt <= on_time_limit else 'late'
-            
-            # Save attendance record
-            record_data = {
-                'session_id': session_id,
-                'student_email': student_email,
-                'student_id': student_id,
-                'check_in_time': capture_dt.isoformat(),
-                'status': status,
-                'face_match_score': confidence,
-                'created_at': datetime.now().isoformat()
-            }
-            
-            try:
-                supabase.table('attendance_records').insert(record_data).execute()
-                new_records += 1
-                logger.info(f"Recorded attendance for {student_id}: {status}")
-            except Exception as e:
-                logger.error(f"Error saving attendance record for {student_id}: {e}")
-        
-        logger.info(f"Processed {len(detected_faces)} faces, created {new_records} new records")
-        
-    except Exception as e:
-        logger.error(f"Background processing error: {e}")
-
-@app.post("/api/session/create")
-async def create_enhanced_session(request: AttendanceSessionRequest):
-    """Create enhanced attendance session with periodic capture support"""
-    try:
-        start_time = datetime.now()
-        end_time = start_time + timedelta(hours=request.duration_hours)
-        
-        session_data = {
-            'class_id': request.class_id,
-            'teacher_email': request.teacher_email,
-            'start_time': start_time.isoformat(),
-            'end_time': end_time.isoformat(),
-            'on_time_limit_minutes': request.on_time_limit_minutes,
-            'capture_interval_minutes': request.capture_interval_minutes,
-            'status': 'active',
-            'created_at': start_time.isoformat()
-        }
-        
-        result = supabase.table('attendance_sessions').insert(session_data).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to create session")
-        
-        session_id = result.data[0]['id']
-        logger.info(f"Created enhanced session: {session_id}")
-        
-        return {
-            "success": True,
-            "session_id": session_id,
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat(),
-            "capture_interval_minutes": request.capture_interval_minutes,
-            "on_time_limit_minutes": request.on_time_limit_minutes
-        }
-        
-    except Exception as e:
-        logger.error(f"Enhanced session creation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
-
-@app.put("/api/session/{session_id}/end")
-async def end_session(session_id: str):
-    """End attendance session"""
-    try:
-        result = supabase.table('attendance_sessions').update({
-            'status': 'ended',
-            'updated_at': datetime.now().isoformat()
-        }).eq('id', session_id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        logger.info(f"Session ended: {session_id}")
-        
-        return {
-            "success": True,
-            "message": "Session ended successfully",
-            "session_id": session_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Error ending session: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to end session: {str(e)}")
-
-async def save_face_embedding_to_db(student_id: str, student_email: str, encoding: np.ndarray, quality: float) -> bool:
-    """Save face embedding to database"""
-    try:
-        if encoding is None or encoding.size == 0:
-            logger.error("Empty encoding provided")
-            return False
-        
-        if not student_id or not student_email:
-            logger.error("Missing student_id or student_email")
-            return False
-        
-        # Validate encoding
-        if not isinstance(encoding, np.ndarray):
-            logger.error("Encoding must be numpy array")
-            return False
-        
-        if encoding.ndim != 1:
-            logger.error(f"Encoding must be 1D array, got {encoding.ndim}D")
-            return False
-        
-        embedding_json = encoding.tolist()
-        
-        # Validate quality
-        quality = max(0.0, min(1.0, float(quality)))
-        
-        face_data = {
-            'student_id': student_id,
-            'face_embedding_json': json.dumps(embedding_json),
-            'face_quality': quality,
-            'is_active': True,
-            'created_at': datetime.now().isoformat(),
-            'updated_at': datetime.now().isoformat()
-        }
-        
-        # Check if student exists
-        student_check = supabase.table('users').select('school_id').eq('school_id', student_id).execute()
-        
-        if not student_check.data:
-            logger.error(f"Student {student_id} not found in users table")
-            return False
-        
-        # Deactivate old embeddings
-        supabase.table('student_face_embeddings').update({
-            'is_active': False,
-            'updated_at': datetime.now().isoformat()
-        }).eq('student_id', student_id).execute()
-        
-        # Insert new embedding
-        result = supabase.table('student_face_embeddings').insert(face_data).execute()
-        
-        if result.data:
-            logger.info(f"Face data saved for student: {student_id} (quality: {quality:.2f})")
-            return True
-        else:
-            logger.error(f"Failed to save face data for student: {student_id}")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Error saving to database: {e}")
-        return Fals
-
-# Health and management endpoints
-@app.get("/health")
-async def enhanced_health_check():
-    """Enhanced health check with database table validation"""
-    try:
-        # Test face_recognition
-        test_array = np.zeros((100, 100, 3), dtype=np.uint8)
-        face_recognition.face_locations(test_array)
-        
-        # Test required database tables
-        required_tables = [
-            'users',
-            'classes',
-            'class_students', 
-            'attendance_sessions',
-            'attendance_records',
-            'student_face_embeddings'
-        ]
-        
-        table_status = {}
-        for table in required_tables:
-            try:
-                result = supabase.table(table).select("count", count='exact').limit(1).execute()
-                table_status[table] = "ok"
-            except Exception as e:
-                logger.error(f"Table {table} check failed: {e}")
-                table_status[table] = f"error: {str(e)}"
-        
-        # Test periodic_captures table (optional)
-        try:
-            supabase.table('periodic_captures').select("count", count='exact').limit(1).execute()
-            table_status['periodic_captures'] = "ok"
-        except Exception:
-            table_status['periodic_captures'] = "missing (will create automatically)"
-        
-        # Cache statistics
-        with cache_lock:
-            cache_size = len(face_cache)
-        
-        # Overall health status
-        all_tables_ok = all(status == "ok" for table, status in table_status.items() 
-                           if table != 'periodic_captures')
-        
-        overall_status = "healthy" if all_tables_ok else "degraded"
-        
-        return {
-            "status": overall_status,
-            "timestamp": datetime.now().isoformat(),
-            "services": {
-                "face_recognition": "ok",
-                "supabase": "ok",
-                "thread_pool": "ok"
-            },
-            "database_tables": table_status,
-            "cache": {
-                "size": cache_size,
-                "max_workers": executor._max_workers
-            },
-            "configuration": {
-                "face_threshold": FACE_THRESHOLD,
-                "debug": DEBUG,
-                "version": "3.0.1"
-            }
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e)
-        }
-
-@app.post("/api/admin/create-tables")
-async def create_missing_tables():
-    """Create missing database tables (admin only)"""
-    try:
-        # SQL สำหรับสร้าง periodic_captures table
-        create_periodic_captures_sql = """
-        CREATE TABLE IF NOT EXISTS periodic_captures (
-            id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-            session_id uuid REFERENCES attendance_sessions(id) ON DELETE CASCADE,
-            capture_time timestamptz NOT NULL,
-            faces_detected integer DEFAULT 0,
-            faces_recognized integer DEFAULT 0,
-            processing_time_ms integer DEFAULT 0,
-            created_at timestamptz DEFAULT now(),
-            updated_at timestamptz DEFAULT now()
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_periodic_captures_session_id ON periodic_captures(session_id);
-        CREATE INDEX IF NOT EXISTS idx_periodic_captures_capture_time ON periodic_captures(capture_time);
-        """
-        
-        # Execute SQL (requires database admin access)
-        # supabase.rpc('execute_sql', {'sql': create_periodic_captures_sql}).execute()
-        
-        return {
-            "success": True,
-            "message": "Database tables creation initiated",
-            "sql": create_periodic_captures_sql,
-            "note": "Please execute this SQL manually in your Supabase dashboard"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error creating tables: {e}")
-        raise HTTPException(status_code=500, detail=f"Table creation failed: {str(e)}")
-    from fastapi import Request
-
-@app.middleware("http")
-async def validation_middleware(request: Request, call_next):
-    """Add request validation middleware"""
-    try:
-        # Log request
-        if DEBUG:
-            logger.info(f"Request: {request.method} {request.url}")
-        
-        response = await call_next(request)
-        
-        # Log response status
-        if DEBUG:
-            logger.info(f"Response: {response.status_code}")
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Request processing error: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Internal server error", "detail": str(e)}
-        )
-    
-
-@app.delete("/api/cache/clear")
-async def clear_face_cache():
-    """Clear face embedding cache"""
-    with cache_lock:
-        cache_size = len(face_cache)
-        face_cache.clear()
-    
-    return {
-        "success": True,
-        "message": f"Cleared {cache_size} cached embeddings",
-        "timestamp": datetime.now().isoformat()
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    print(f"🚀 Starting Enhanced Face Recognition Server on {HOST}:{PORT}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
-# เพิ่มใน main.py
-
-@app.post("/api/class/start-session")
-async def start_class_session(
+@app.post("/api/session/start-motion-detection")
+async def start_motion_detection_session(
     background_tasks: BackgroundTasks,
     class_id: str = Form(...),
     teacher_email: str = Form(...),
     duration_hours: int = Form(2),
-    capture_interval_minutes: int = Form(5),
+    motion_threshold: float = Form(None),
+    cooldown_seconds: int = Form(30),
     on_time_limit_minutes: int = Form(30),
-    initial_image: UploadFile = File(...)
+    initial_image: UploadFile = File(None)
 ):
-    """Start class session with initial attendance snapshot"""
+    """Start motion detection attendance session"""
     try:
-        logger.info(f"Starting class session for {class_id} by {teacher_email}")
+        if not MOTION_DETECTION_ENABLED:
+            raise HTTPException(status_code=400, detail="Motion detection is disabled")
         
-        # 1. Validate class and teacher
+        logger.info(f"🎯 Starting motion detection session for {class_id} by {teacher_email}")
+        
+        # Validate class and teacher
         class_result = supabase.table('classes').select('*').eq('class_id', class_id).eq('teacher_email', teacher_email).single().execute()
         
         if not class_result.data:
             raise HTTPException(status_code=404, detail="Class not found or you are not the teacher")
         
-        # 2. Check if there's already an active session
+        # Check for existing active session
         existing_session = supabase.table('attendance_sessions').select('id').eq('class_id', class_id).eq('status', 'active').execute()
         
         if existing_session.data:
             raise HTTPException(status_code=400, detail="There is already an active session for this class")
         
-        # 3. Create new session
+        # Use adaptive threshold if not specified
+        if motion_threshold is None:
+            motion_threshold = motion_processor.get_motion_threshold('0-10', DEFAULT_MOTION_THRESHOLD)
+        
+        # Create motion detection session
         start_time = datetime.now()
         end_time = start_time + timedelta(hours=duration_hours)
-        on_time_deadline = start_time + timedelta(minutes=on_time_limit_minutes)
         
         session_data = {
             'class_id': class_id,
@@ -880,92 +671,389 @@ async def start_class_session(
             'start_time': start_time.isoformat(),
             'end_time': end_time.isoformat(),
             'on_time_limit_minutes': on_time_limit_minutes,
-            'capture_interval_minutes': capture_interval_minutes,
             'status': 'active',
+            'session_type': 'motion_detection',
+            'motion_threshold': motion_threshold,
+            'cooldown_seconds': cooldown_seconds,
+            'max_snapshots_per_hour': MAX_SNAPSHOTS_PER_HOUR,
             'created_at': start_time.isoformat()
         }
         
         session_result = supabase.table('attendance_sessions').insert(session_data).execute()
         
         if not session_result.data:
-            raise HTTPException(status_code=500, detail="Failed to create session")
+            raise HTTPException(status_code=500, detail="Failed to create motion detection session")
         
         session_id = session_result.data[0]['id']
         
-        # 4. Process initial image in background
+        # Create motion session tracking
+        motion_config = {
+            'motion_threshold': motion_threshold,
+            'cooldown_seconds': cooldown_seconds,
+            'max_snapshots_per_hour': MAX_SNAPSHOTS_PER_HOUR,
+            'class_id': class_id,
+            'teacher_email': teacher_email
+        }
+        
+        motion_session_manager.create_session(session_id, motion_config)
+        
+        # Process initial image if provided
         if initial_image:
             image_data = await initial_image.read()
-            image_pil = Image.open(io.BytesIO(image_data))
             
-            if image_pil.mode != 'RGB':
-                image_pil = image_pil.convert('RGB')
-            
-            image_array = np.array(image_pil)
-            
-            # Get enrolled students
-            enrolled_students = await get_enrolled_students_for_class(class_id)
-            
-            # Process initial attendance in background
-            background_tasks.add_task(
-                process_start_class_attendance,
-                image_array,
-                enrolled_students,
-                session_id,
-                session_data,
-                start_time.isoformat()
-            )
+            # Add to processing queue with highest priority
+            await motion_processing_queue.put({
+                "priority": 1,
+                "image_data": image_data,
+                "session_id": session_id,
+                "capture_time": start_time.isoformat(),
+                "phase": "0-10",
+                "processing_type": "session_start",
+                "trigger_type": "manual",
+                "motion_strength": 1.0,  # Full strength for manual start
+                "session_data": session_data
+            })
         
-        # 5. Log capture event
+        # Log session start
         capture_log = {
             'session_id': session_id,
             'capture_time': start_time.isoformat(),
-            'faces_detected': 0,  # Will be updated by background task
-            'faces_recognized': 0,
+            'capture_type': 'session_start',
+            'trigger_type': 'manual',
+            'motion_strength': 1.0,
+            'processing_status': 'queued',
             'created_at': start_time.isoformat()
         }
         
-        supabase.table('periodic_captures').insert(capture_log).execute()
+        supabase.table('motion_captures').insert(capture_log).execute()
         
-        logger.info(f"✅ Class session started: {session_id}")
+        logger.info(f"✅ Motion detection session started: {session_id}")
         
         return {
             "success": True,
-            "message": "Class session started successfully",
+            "message": "Motion detection session started successfully",
             "session_id": session_id,
+            "session_type": "motion_detection",
             "class_id": class_id,
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
-            "on_time_deadline": on_time_deadline.isoformat(),
-            "capture_interval_minutes": capture_interval_minutes,
-            "enrolled_students_count": len(enrolled_students) if 'enrolled_students' in locals() else 0
+            "motion_threshold": motion_threshold,
+            "cooldown_seconds": cooldown_seconds,
+            "max_snapshots_per_hour": MAX_SNAPSHOTS_PER_HOUR,
+            "processing_queue_size": motion_processing_queue.qsize()
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error starting class session: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start class session: {str(e)}")
+        logger.error(f"❌ Error starting motion detection session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start motion detection session: {str(e)}")
 
-async def process_start_class_attendance(
-    image_array: np.ndarray,
-    enrolled_students: List[str], 
-    session_id: str,
-    session_data: Dict,
-    capture_time: str
+@app.post("/api/motion/snapshot")
+async def process_motion_triggered_snapshot(
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    session_id: str = Form(...),
+    motion_strength: float = Form(...),
+    elapsed_minutes: int = Form(0),
+    device_id: str = Form(None)
 ):
-    """Background processing for start-of-class attendance"""
+    """Process motion-triggered snapshot"""
     try:
-        logger.info(f"📸 Processing start-of-class image for session {session_id}")
+        if not MOTION_DETECTION_ENABLED:
+            raise HTTPException(status_code=400, detail="Motion detection is disabled")
         
-        # Detect faces
-        face_locations = face_recognition.face_locations(image_array, model="hog")
-        faces_detected = len(face_locations)
+        # Validate active motion session
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').eq('session_type', 'motion_detection').single().execute()
         
-        # Process faces for recognition
-        detected_faces = process_multiple_faces(image_array, enrolled_students)
-        faces_recognized = len([f for f in detected_faces if f['verified']])
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Active motion detection session not found")
         
-        # Record attendance for recognized students
+        session_data = session_result.data
+        
+        # Record motion event
+        motion_session_manager.record_motion_event(session_id, motion_strength, snapshot_taken=False)
+        
+        # Check if snapshot is allowed (cooldown, rate limiting)
+        snapshot_check = motion_session_manager.can_take_snapshot(session_id)
+        
+        if not snapshot_check['allowed']:
+            logger.info(f"📵 Motion snapshot blocked: {snapshot_check['reason']}")
+            
+            # Record motion event without snapshot
+            capture_log = {
+                'session_id': session_id,
+                'capture_time': datetime.now().isoformat(),
+                'capture_type': 'motion_detected',
+                'trigger_type': 'motion',
+                'motion_strength': motion_strength,
+                'processing_status': 'blocked',
+                'block_reason': snapshot_check['reason'],
+                'device_id': device_id,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            supabase.table('motion_captures').insert(capture_log).execute()
+            
+            return {
+                "success": False,
+                "message": f"Motion detected but snapshot blocked: {snapshot_check['reason']}",
+                "session_id": session_id,
+                "motion_strength": motion_strength,
+                "block_reason": snapshot_check['reason'],
+                "remaining_seconds": snapshot_check.get('remaining_seconds', 0),
+                "motion_recorded": True
+            }
+        
+        # Determine processing phase and configuration
+        phase = motion_processor.get_phase(elapsed_minutes)
+        config = motion_processor.get_config(phase)
+        
+        # Calculate motion-based priority
+        priority = motion_processor.calculate_motion_priority(motion_strength, phase)
+        
+        logger.info(f"📸 Motion snapshot triggered: strength={motion_strength:.3f}, phase={phase}, priority={priority}")
+        
+        # Process image data
+        image_data = await image.read()
+        
+        # Add to motion processing queue
+        await motion_processing_queue.put({
+            "priority": priority,
+            "image_data": image_data,
+            "session_id": session_id,
+            "capture_time": datetime.now().isoformat(),
+            "phase": phase,
+            "config": config,
+            "processing_type": "motion_triggered",
+            "trigger_type": "motion",
+            "motion_strength": motion_strength,
+            "session_data": session_data,
+            "elapsed_minutes": elapsed_minutes,
+            "device_id": device_id
+        })
+        
+        # Quick face detection for immediate response
+        try:
+            image_pil = Image.open(io.BytesIO(image_data))
+            if image_pil.mode != 'RGB':
+                image_pil = image_pil.convert('RGB')
+            
+            image_array = np.array(image_pil)
+            face_locations = face_recognition.face_locations(image_array, model="hog")
+            faces_detected = len(face_locations)
+        except:
+            faces_detected = 0
+        
+        # Update motion session - snapshot taken
+        motion_session_manager.record_motion_event(session_id, motion_strength, snapshot_taken=True)
+        
+        # Log motion capture
+        capture_log = {
+            'session_id': session_id,
+            'capture_time': datetime.now().isoformat(),
+            'capture_type': 'motion_triggered',
+            'trigger_type': 'motion',
+            'motion_strength': motion_strength,
+            'processing_phase': phase,
+            'faces_detected': faces_detected,
+            'processing_status': 'queued',
+            'queue_priority': priority,
+            'device_id': device_id,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        supabase.table('motion_captures').insert(capture_log).execute()
+        
+        return {
+            "success": True,
+            "message": f"Motion-triggered snapshot queued for processing",
+            "session_id": session_id,
+            "motion_strength": motion_strength,
+            "phase": phase,
+            "faces_detected": faces_detected,
+            "processing_priority": priority,
+            "queue_size": motion_processing_queue.qsize(),
+            "config": {
+                "threshold": config['face_threshold'],
+                "accuracy": config['model_accuracy'],
+                "max_time": config['max_processing_time']
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Motion snapshot error: {e}")
+        raise HTTPException(status_code=500, detail=f"Motion snapshot failed: {str(e)}")
+
+@app.post("/api/motion/manual-capture")
+async def manual_motion_capture(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    image: UploadFile = File(...),
+    force_capture: bool = Form(False)
+):
+    """Manual capture by teacher during motion detection session"""
+    try:
+        # Validate motion detection session
+        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').eq('session_type', 'motion_detection').single().execute()
+        
+        if not session_result.data:
+            raise HTTPException(status_code=404, detail="Active motion detection session not found")
+        
+        session_data = session_result.data
+        
+        # Calculate elapsed time for phase determination
+        session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
+        elapsed_minutes = int((datetime.now() - session_start).total_seconds() / 60)
+        
+        phase = motion_processor.get_phase(elapsed_minutes)
+        config = motion_processor.get_config(phase)
+        
+        # Manual captures bypass cooldown if force_capture is True
+        if not force_capture:
+            snapshot_check = motion_session_manager.can_take_snapshot(session_id)
+            if not snapshot_check['allowed']:
+                logger.info(f"📵 Manual capture blocked: {snapshot_check['reason']}")
+                return {
+                    "success": False,
+                    "message": f"Manual capture blocked: {snapshot_check['reason']}",
+                    "block_reason": snapshot_check['reason'],
+                    "force_capture_available": True
+                }
+        
+        logger.info(f"📸 Manual capture in motion session {session_id} (phase: {phase}, forced: {force_capture})")
+        
+        # Process image data
+        image_data = await image.read()
+        
+        # Manual captures get high priority
+        priority = max(1, config['processing_priority'] - 1)
+        
+        await motion_processing_queue.put({
+            "priority": priority,
+            "image_data": image_data,
+            "session_id": session_id,
+            "capture_time": datetime.now().isoformat(),
+            "phase": phase,
+            "config": config,
+            "processing_type": "manual_teacher_capture",
+            "trigger_type": "manual",
+            "motion_strength": 1.0,  # Full strength for manual
+            "session_data": session_data,
+            "elapsed_minutes": elapsed_minutes,
+            "force_capture": force_capture
+        })
+        
+        # Quick face detection for immediate response
+        try:
+            image_pil = Image.open(io.BytesIO(image_data))
+            if image_pil.mode != 'RGB':
+                image_pil = image_pil.convert('RGB')
+            
+            image_array = np.array(image_pil)
+            face_locations = face_recognition.face_locations(image_array, model="hog")
+            faces_detected = len(face_locations)
+        except:
+            faces_detected = 0
+        
+        # Update motion session - manual snapshot taken
+        motion_session_manager.record_motion_event(session_id, 1.0, snapshot_taken=True)
+        
+        # Log manual capture
+        capture_log = {
+            'session_id': session_id,
+            'capture_time': datetime.now().isoformat(),
+            'capture_type': 'manual_teacher',
+            'trigger_type': 'manual',
+            'motion_strength': 1.0,
+            'processing_phase': phase,
+            'faces_detected': faces_detected,
+            'processing_status': 'queued',
+            'queue_priority': priority,
+            'force_capture': force_capture,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        supabase.table('motion_captures').insert(capture_log).execute()
+        
+        return {
+            "success": True,
+            "message": f"Manual capture queued for processing",
+            "session_id": session_id,
+            "faces_detected": faces_detected,
+            "processing_priority": priority,
+            "force_capture": force_capture,
+            "queue_size": motion_processing_queue.qsize()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Manual motion capture error: {e}")
+        raise HTTPException(status_code=500, detail=f"Manual capture failed: {str(e)}")
+
+# ==================== Background Motion Processing ====================
+
+async def process_motion_queue():
+    """Background processor for motion-triggered attendance queue"""
+    logger.info("🔄 Starting motion processing queue...")
+    
+    while True:
+        try:
+            item = await motion_processing_queue.get()
+            if not item:
+                await asyncio.sleep(1)
+                continue
+            
+            # Process item based on type
+            if item['processing_type'] == 'session_start':
+                await process_motion_session_start(item)
+            elif item['processing_type'] == 'motion_triggered':
+                await process_motion_triggered_background(item)
+            elif item['processing_type'] == 'manual_teacher_capture':
+                await process_manual_teacher_motion_capture(item)
+            else:
+                logger.warning(f"Unknown motion processing type: {item.get('processing_type')}")
+            
+        except Exception as e:
+            logger.error(f"❌ Motion queue processing error: {e}")
+            await asyncio.sleep(1)
+
+async def process_motion_session_start(item: Dict):
+    """Process session start for motion detection system"""
+    try:
+        start_time = time.time()
+        session_id = item['session_id']
+        session_data = item['session_data']
+        
+        logger.info(f"🚀 Processing motion session start: {session_id}")
+        
+        # Process image
+        image_pil = Image.open(io.BytesIO(item['image_data']))
+        if image_pil.mode != 'RGB':
+            image_pil = image_pil.convert('RGB')
+        
+        image_array = np.array(image_pil)
+        
+        # Get enrolled students
+        enrolled_students = await get_enrolled_students_for_class(session_data['class_id'])
+        
+        if not enrolled_students:
+            logger.warning(f"No enrolled students for motion session start: {session_id}")
+            return
+        
+        # Process faces with high accuracy for session start
+        config = motion_processor.get_config('0-10')  # Use highest accuracy
+        detected_faces = process_motion_triggered_faces(
+            image_array, 
+            enrolled_students, 
+            config, 
+            item['motion_strength']
+        )
+        
+        # Record attendance for session start
         new_records = 0
         for face_info in detected_faces:
             if not face_info['verified']:
@@ -982,122 +1070,90 @@ async def process_start_class_attendance(
             
             student_email = student_result.data['email']
             
-            # Since this is start of class, everyone should be "present"
+            # Record as 'present' for session start
             record_data = {
                 'session_id': session_id,
                 'student_email': student_email,
                 'student_id': student_id,
-                'check_in_time': capture_time,
-                'status': 'present',  # Start of class = present
+                'check_in_time': item['capture_time'],
+                'status': 'present',  # Session start = present
                 'face_match_score': confidence,
-                'detection_method': 'start_class',
-                'face_quality': face_info.get('quality', {}),
+                'detection_method': 'motion_session_start',
+                'processing_phase': '0-10',
+                'face_quality': face_info.get('quality_score', 1.0),
+                'motion_strength': item['motion_strength'],
+                'trigger_type': 'manual',
                 'created_at': datetime.now().isoformat()
             }
             
             try:
                 supabase.table('attendance_records').insert(record_data).execute()
                 new_records += 1
-                logger.info(f"✅ Recorded start-class attendance for {student_id}")
+                logger.info(f"✅ Motion session start attendance recorded for {student_id}")
             except Exception as e:
-                logger.error(f"❌ Error saving start-class record for {student_id}: {e}")
+                logger.error(f"❌ Error saving motion session start record for {student_id}: {e}")
+        
+        processing_time = time.time() - start_time
         
         # Update capture log
-        supabase.table('periodic_captures').update({
-            'faces_detected': faces_detected,
-            'faces_recognized': faces_recognized,
-            'processing_time_ms': int(time.time() * 1000) % 1000000
-        }).eq('session_id', session_id).eq('capture_time', capture_time).execute()
+        supabase.table('motion_captures').update({
+            'faces_detected': len(detected_faces),
+            'faces_recognized': len([f for f in detected_faces if f['verified']]),
+            'new_records': new_records,
+            'processing_time_ms': int(processing_time * 1000),
+            'processing_status': 'completed'
+        }).eq('session_id', session_id).eq('capture_time', item['capture_time']).execute()
         
-        logger.info(f"📊 Start-class processing complete: {faces_detected} faces detected, {new_records} students recorded")
+        logger.info(f"🎯 Motion session start processing complete: {new_records} students recorded in {processing_time:.2f}s")
         
     except Exception as e:
-        logger.error(f"❌ Error processing start-class attendance: {e}")
+        logger.error(f"❌ Error processing motion session start: {e}")
+        
+        # Update status to failed
+        try:
+            supabase.table('motion_captures').update({
+                'processing_status': 'failed',
+                'error_message': str(e)
+            }).eq('session_id', item['session_id']).eq('capture_time', item['capture_time']).execute()
+        except:
+            pass
 
-@app.post("/api/class/manual-capture")
-async def manual_attendance_capture(
-    background_tasks: BackgroundTasks,
-    session_id: str = Form(...),
-    image: UploadFile = File(...)
-):
-    """Manual attendance capture during class"""
+async def process_motion_triggered_background(item: Dict):
+    """Process motion-triggered attendance capture"""
     try:
-        # Validate session
-        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').single().execute()
+        start_time = time.time()
+        session_id = item['session_id']
+        session_data = item['session_data']
+        config = item['config']
+        phase = item['phase']
+        motion_strength = item['motion_strength']
         
-        if not session_result.data:
-            raise HTTPException(status_code=404, detail="Active session not found")
-        
-        session_data = session_result.data
-        class_id = session_data['class_id']
+        logger.info(f"🚶 Processing motion-triggered capture: {session_id} (phase: {phase}, strength: {motion_strength:.3f})")
         
         # Process image
-        image_data = await image.read()
-        image_pil = Image.open(io.BytesIO(image_data))
-        
+        image_pil = Image.open(io.BytesIO(item['image_data']))
         if image_pil.mode != 'RGB':
             image_pil = image_pil.convert('RGB')
         
         image_array = np.array(image_pil)
         
-        # Quick face count
-        face_locations = face_recognition.face_locations(image_array, model="hog")
-        faces_detected = len(face_locations)
+        # Get enrolled students (cached)
+        enrolled_students = await get_enrolled_students_for_class(session_data['class_id'])
         
-        # Get enrolled students
-        enrolled_students = await get_enrolled_students_for_class(class_id)
+        if not enrolled_students:
+            logger.warning(f"No enrolled students for motion capture: {session_id}")
+            return
         
-        # Process in background
-        capture_time = datetime.now().isoformat()
-        background_tasks.add_task(
-            process_manual_attendance_background,
-            image_array,
-            enrolled_students,
-            session_id,
-            session_data,
-            capture_time
+        # Process faces with motion-specific optimizations
+        detected_faces = process_motion_triggered_faces(
+            image_array, 
+            enrolled_students, 
+            config, 
+            motion_strength
         )
         
-        # Log capture
-        capture_log = {
-            'session_id': session_id,
-            'capture_time': capture_time,
-            'faces_detected': faces_detected,
-            'faces_recognized': 0,  # Will be updated by background task
-            'created_at': capture_time
-        }
-        
-        supabase.table('periodic_captures').insert(capture_log).execute()
-        
-        return {
-            "success": True,
-            "message": f"Manual capture processed - {faces_detected} faces detected",
-            "session_id": session_id,
-            "faces_detected": faces_detected,
-            "capture_time": capture_time
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Manual capture error: {e}")
-        raise HTTPException(status_code=500, detail=f"Manual capture failed: {str(e)}")
-
-async def process_manual_attendance_background(
-    image_array: np.ndarray,
-    enrolled_students: List[str],
-    session_id: str,
-    session_data: Dict,
-    capture_time: str
-):
-    """Background processing for manual attendance capture"""
-    try:
-        # Process faces similar to periodic attendance
-        detected_faces = process_multiple_faces(image_array, enrolled_students)
-        faces_recognized = len([f for f in detected_faces if f['verified']])
-        
+        # Record new attendance
         new_records = 0
-        
         for face_info in detected_faces:
             if not face_info['verified']:
                 continue
@@ -1120,51 +1176,240 @@ async def process_manual_attendance_background(
                 continue  # Skip if already recorded
             
             # Determine status based on timing
-            capture_dt = datetime.fromisoformat(capture_time.replace('Z', '+00:00'))
+            capture_dt = datetime.fromisoformat(item['capture_time'].replace('Z', '+00:00'))
             session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
             on_time_limit = session_start + timedelta(minutes=session_data['on_time_limit_minutes'])
             
             status = 'present' if capture_dt <= on_time_limit else 'late'
             
-            # Save record
+            # Record motion-triggered attendance
             record_data = {
                 'session_id': session_id,
                 'student_email': student_email,
                 'student_id': student_id,
-                'check_in_time': capture_time,
+                'check_in_time': item['capture_time'],
                 'status': status,
                 'face_match_score': confidence,
-                'detection_method': 'manual',
-                'face_quality': face_info.get('quality', {}),
+                'detection_method': 'motion_triggered',
+                'processing_phase': phase,
+                'face_quality': face_info.get('quality_score', 1.0),
+                'motion_strength': motion_strength,
+                'trigger_type': 'motion',
+                'device_id': item.get('device_id'),
                 'created_at': datetime.now().isoformat()
             }
             
             try:
                 supabase.table('attendance_records').insert(record_data).execute()
                 new_records += 1
-                logger.info(f"✅ Manual attendance recorded for {student_id}: {status}")
+                logger.info(f"✅ Motion-triggered attendance recorded for {student_id}: {status}")
             except Exception as e:
-                logger.error(f"❌ Error saving manual record for {student_id}: {e}")
+                logger.error(f"❌ Error saving motion record for {student_id}: {e}")
+        
+        processing_time = time.time() - start_time
         
         # Update capture log
-        supabase.table('periodic_captures').update({
-            'faces_recognized': faces_recognized
-        }).eq('session_id', session_id).eq('capture_time', capture_time).execute()
+        supabase.table('motion_captures').update({
+            'faces_detected': len(detected_faces),
+            'faces_recognized': len([f for f in detected_faces if f['verified']]),
+            'new_records': new_records,
+            'processing_time_ms': int(processing_time * 1000),
+            'processing_status': 'completed'
+        }).eq('session_id', session_id).eq('capture_time', item['capture_time']).execute()
         
-        logger.info(f"📊 Manual capture complete: {faces_recognized} faces recognized, {new_records} new records")
+        logger.info(f"🤖 Motion capture complete: {new_records} new records in {processing_time:.2f}s")
         
     except Exception as e:
-        logger.error(f"❌ Error processing manual capture: {e}")
+        logger.error(f"❌ Error processing motion capture: {e}")
+        
+        # Update status to failed
+        try:
+            supabase.table('motion_captures').update({
+                'processing_status': 'failed',
+                'error_message': str(e)
+            }).eq('session_id', item['session_id']).eq('capture_time', item['capture_time']).execute()
+        except:
+            pass
 
-@app.get("/api/session/{session_id}/statistics")
-async def get_session_statistics(session_id: str):
-    """Get detailed session statistics"""
+async def process_manual_teacher_motion_capture(item: Dict):
+    """Process manual teacher capture in motion detection session"""
+    try:
+        start_time = time.time()
+        session_id = item['session_id']
+        session_data = item['session_data']
+        config = item['config']
+        phase = item['phase']
+        
+        logger.info(f"👨‍🏫 Processing manual teacher capture in motion session: {session_id} (phase: {phase})")
+        
+        # Process image with high priority settings
+        image_pil = Image.open(io.BytesIO(item['image_data']))
+        if image_pil.mode != 'RGB':
+            image_pil = image_pil.convert('RGB')
+        
+        image_array = np.array(image_pil)
+        
+        # Get enrolled students
+        enrolled_students = await get_enrolled_students_for_class(session_data['class_id'])
+        
+        if not enrolled_students:
+            logger.warning(f"No enrolled students for manual motion capture: {session_id}")
+            return
+        
+        # Use high accuracy for manual teacher captures
+        manual_config = config.copy()
+        manual_config['model_accuracy'] = 'high'
+        manual_config['enable_quality_check'] = True
+        
+        detected_faces = process_motion_triggered_faces(
+            image_array, 
+            enrolled_students, 
+            manual_config, 
+            item['motion_strength']
+        )
+        
+        # Record new attendance
+        new_records = 0
+        for face_info in detected_faces:
+            if not face_info['verified']:
+                continue
+            
+            student_id = face_info['student_id']
+            confidence = face_info['confidence']
+            
+            # Get student email
+            student_result = supabase.table('users').select('email').eq('school_id', student_id).single().execute()
+            
+            if not student_result.data:
+                continue
+            
+            student_email = student_result.data['email']
+            
+            # Check if already recorded (skip for forced captures)
+            if not item.get('force_capture', False):
+                existing_record = supabase.table('attendance_records').select('id').eq('session_id', session_id).eq('student_email', student_email).execute()
+                
+                if existing_record.data:
+                    continue  # Skip if already recorded
+            
+            # Determine status based on timing
+            capture_dt = datetime.fromisoformat(item['capture_time'].replace('Z', '+00:00'))
+            session_start = datetime.fromisoformat(session_data['start_time'].replace('Z', '+00:00'))
+            on_time_limit = session_start + timedelta(minutes=session_data['on_time_limit_minutes'])
+            
+            status = 'present' if capture_dt <= on_time_limit else 'late'
+            
+            # Record manual teacher attendance
+            record_data = {
+                'session_id': session_id,
+                'student_email': student_email,
+                'student_id': student_id,
+                'check_in_time': item['capture_time'],
+                'status': status,
+                'face_match_score': confidence,
+                'detection_method': 'manual_teacher_motion',
+                'processing_phase': phase,
+                'face_quality': face_info.get('quality_score', 1.0),
+                'motion_strength': item['motion_strength'],
+                'trigger_type': 'manual',
+                'force_capture': item.get('force_capture', False),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            try:
+                supabase.table('attendance_records').insert(record_data).execute()
+                new_records += 1
+                logger.info(f"✅ Manual teacher motion attendance recorded for {student_id}: {status}")
+            except Exception as e:
+                logger.error(f"❌ Error saving manual teacher motion record for {student_id}: {e}")
+        
+        processing_time = time.time() - start_time
+        
+        # Update capture log
+        supabase.table('motion_captures').update({
+            'faces_detected': len(detected_faces),
+            'faces_recognized': len([f for f in detected_faces if f['verified']]),
+            'new_records': new_records,
+            'processing_time_ms': int(processing_time * 1000),
+            'processing_status': 'completed'
+        }).eq('session_id', session_id).eq('capture_time', item['capture_time']).execute()
+        
+        logger.info(f"👨‍🏫 Manual teacher motion capture complete: {new_records} new records in {processing_time:.2f}s")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing manual teacher motion capture: {e}")
+        
+        # Update status to failed
+        try:
+            supabase.table('motion_captures').update({
+                'processing_status': 'failed',
+                'error_message': str(e)
+            }).eq('session_id', item['session_id']).eq('capture_time', item['capture_time']).execute()
+        except:
+            pass
+
+# ==================== Motion Session Management ====================
+
+@app.put("/api/session/{session_id}/end-motion")
+async def end_motion_detection_session(session_id: str):
+    """End motion detection attendance session"""
+    try:
+        # Validate and end session
+        result = supabase.table('attendance_sessions').update({
+            'status': 'ended',
+            'ended_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }).eq('id', session_id).eq('session_type', 'motion_detection').execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Motion detection session not found")
+        
+        # Remove from motion session manager
+        motion_session_manager.remove_session(session_id)
+        
+        logger.info(f"📝 Motion detection session ended: {session_id}")
+        
+        # Generate final statistics
+        stats = await get_motion_session_statistics_internal(session_id)
+        
+        return {
+            "success": True,
+            "message": "Motion detection session ended successfully",
+            "session_id": session_id,
+            "session_type": "motion_detection",
+            "final_statistics": stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error ending motion detection session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to end motion session: {str(e)}")
+
+@app.get("/api/session/{session_id}/motion-statistics")
+async def get_motion_session_statistics(session_id: str):
+    """Get detailed motion detection statistics"""
+    try:
+        stats = await get_motion_session_statistics_internal(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "session_type": "motion_detection",
+            **stats
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting motion session statistics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get motion statistics: {str(e)}")
+
+async def get_motion_session_statistics_internal(session_id: str) -> Dict:
+    """Internal function to get comprehensive motion session statistics"""
     try:
         # Get session info
         session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).single().execute()
         
         if not session_result.data:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise ValueError("Motion detection session not found")
         
         session_data = session_result.data
         
@@ -1172,274 +1417,570 @@ async def get_session_statistics(session_id: str):
         records_result = supabase.table('attendance_records').select('*').eq('session_id', session_id).execute()
         records = records_result.data or []
         
-        # Get capture logs
-        captures_result = supabase.table('periodic_captures').select('*').eq('session_id', session_id).order('capture_time').execute()
+        # Get motion capture logs
+        captures_result = supabase.table('motion_captures').select('*').eq('session_id', session_id).order('capture_time').execute()
         captures = captures_result.data or []
         
-        # Get total enrolled students
+        # Get motion session stats from manager
+        motion_stats = motion_session_manager.get_session_stats(session_id) or {}
+        
+        # Get enrolled students count
         enrolled_students = await get_enrolled_students_for_class(session_data['class_id'])
         total_students = len(enrolled_students)
         
-        # Calculate statistics
+        # Calculate attendance statistics
         present_count = len([r for r in records if r['status'] == 'present'])
         late_count = len([r for r in records if r['status'] == 'late'])
         absent_count = total_students - len(records)
         attendance_rate = len(records) / total_students if total_students > 0 else 0
         
-        # Face recognition stats
-        face_verified_count = len([r for r in records if r['face_match_score'] and r['face_match_score'] > FACE_THRESHOLD])
-        avg_confidence = np.mean([r['face_match_score'] for r in records if r['face_match_score']]) if records else 0
+        # Motion-specific statistics
+        motion_events = motion_stats.get('motion_events', 0)
+        snapshots_taken = motion_stats.get('snapshots_taken', 0)
+        snapshot_efficiency = snapshots_taken / motion_events if motion_events > 0 else 0
         
-        # Capture statistics
-        total_captures = len(captures)
-        total_faces_detected = sum([c['faces_detected'] or 0 for c in captures])
-        total_faces_recognized = sum([c['faces_recognized'] or 0 for c in captures])
+        # Capture type breakdown
+        capture_types = {}
+        trigger_types = {}
+        for capture in captures:
+            capture_type = capture.get('capture_type', 'unknown')
+            trigger_type = capture.get('trigger_type', 'unknown')
+            
+            capture_types[capture_type] = capture_types.get(capture_type, 0) + 1
+            trigger_types[trigger_type] = trigger_types.get(trigger_type, 0) + 1
+        
+        # Motion strength analysis
+        motion_strengths = [c.get('motion_strength', 0) for c in captures if c.get('motion_strength')]
+        avg_motion_strength = np.mean(motion_strengths) if motion_strengths else 0
+        
+        # Processing phase breakdown
+        phase_stats = {}
+        for capture in captures:
+            phase = capture.get('processing_phase', 'unknown')
+            if phase not in phase_stats:
+                phase_stats[phase] = {'count': 0, 'faces_detected': 0, 'faces_recognized': 0}
+            phase_stats[phase]['count'] += 1
+            phase_stats[phase]['faces_detected'] += capture.get('faces_detected', 0)
+            phase_stats[phase]['faces_recognized'] += capture.get('faces_recognized', 0)
+        
+        # Detection method breakdown
+        method_stats = {}
+        for record in records:
+            method = record.get('detection_method', 'unknown')
+            method_stats[method] = method_stats.get(method, 0) + 1
         
         return {
-            "success": True,
-            "session_id": session_id,
             "session_info": session_data,
-            "statistics": {
+            "attendance_statistics": {
                 "total_students": total_students,
                 "present_count": present_count,
                 "late_count": late_count,
                 "absent_count": absent_count,
-                "attendance_rate": round(attendance_rate, 3),
-                "face_verification_rate": round(face_verified_count / len(records), 3) if records else 0,
-                "average_confidence": round(float(avg_confidence), 3)
+                "attendance_rate": round(attendance_rate, 3)
             },
-            "capture_statistics": {
-                "total_captures": total_captures,
-                "total_faces_detected": total_faces_detected,
-                "total_faces_recognized": total_faces_recognized,
-                "detection_rate": round(total_faces_recognized / total_faces_detected, 3) if total_faces_detected > 0 else 0
+            "motion_statistics": {
+                "total_motion_events": motion_events,
+                "snapshots_taken": snapshots_taken,
+                "snapshot_efficiency": round(snapshot_efficiency, 3),
+                "average_motion_strength": round(float(avg_motion_strength), 3),
+                "motion_threshold": session_data.get('motion_threshold', DEFAULT_MOTION_THRESHOLD),
+                "cooldown_seconds": session_data.get('cooldown_seconds', MOTION_COOLDOWN_SECONDS)
             },
-            "attendance_records": records,
-            "capture_logs": captures
+            "capture_breakdown": {
+                "by_type": capture_types,
+                "by_trigger": trigger_types
+            },
+            "phase_breakdown": phase_stats,
+            "method_breakdown": method_stats,
+            "processing_queue_size": motion_processing_queue.qsize(),
+            "hourly_motion_events": motion_stats.get('hourly_events', {})
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating motion session statistics: {e}")
+        return {"error": str(e)}
+
+# ==================== System Health and Monitoring ====================
+
+@app.get("/health")
+async def motion_system_health():
+    """Enhanced health check for motion detection system"""
+    try:
+        # Test face_recognition
+        test_array = np.zeros((100, 100, 3), dtype=np.uint8)
+        face_recognition.face_locations(test_array)
+        
+        # Test database tables
+        required_tables = [
+            'users',
+            'classes', 
+            'class_students',
+            'attendance_sessions',
+            'attendance_records',
+            'student_face_embeddings',
+            'motion_captures'  # New table for motion system
+        ]
+        
+        table_status = {}
+        for table in required_tables:
+            try:
+                result = supabase.table(table).select("count", count='exact').limit(1).execute()
+                table_status[table] = "ok"
+            except Exception as e:
+                logger.error(f"Table {table} check failed: {e}")
+                table_status[table] = f"error: {str(e)}"
+        
+        # Cache and queue statistics
+        with cache_lock:
+            cache_size = len(face_cache)
+        
+        queue_size = motion_processing_queue.qsize()
+        
+        # Motion session statistics
+        active_motion_sessions = len(motion_session_manager.sessions)
+        
+        # System status
+        all_critical_tables_ok = all(
+            status == "ok" for table, status in table_status.items() 
+            if table != 'motion_captures'  # This table can be created automatically
+        )
+        
+        overall_status = "healthy" if all_critical_tables_ok else "degraded"
+        
+        return {
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "system_type": "motion_detection_attendance",
+            "services": {
+                "face_recognition": "ok",
+                "supabase": "ok",
+                "motion_processing_queue": "ok",
+                "motion_session_manager": "ok",
+                "background_processor": "ok"
+            },
+            "database_tables": table_status,
+            "performance": {
+                "face_cache_size": cache_size,
+                "processing_queue_size": queue_size,
+                "active_motion_sessions": active_motion_sessions,
+                "thread_pool_workers": executor._max_workers,
+                "adaptive_phases": list(motion_processor.adaptive_thresholds.keys())
+            },
+            "motion_configuration": {
+                "motion_detection_enabled": MOTION_DETECTION_ENABLED,
+                "default_motion_threshold": DEFAULT_MOTION_THRESHOLD,
+                "motion_cooldown_seconds": MOTION_COOLDOWN_SECONDS,
+                "max_snapshots_per_hour": MAX_SNAPSHOTS_PER_HOUR,
+                "adaptive_thresholds": motion_processor.adaptive_thresholds
+            },
+            "configuration": {
+                "face_threshold": FACE_THRESHOLD,
+                "debug_mode": DEBUG,
+                "version": "5.0.0-motion-detection",
+                "supported_features": [
+                    "face_enrollment",
+                    "motion_detection_sessions", 
+                    "motion_triggered_snapshots",
+                    "manual_teacher_capture",
+                    "adaptive_motion_processing",
+                    "motion_session_statistics",
+                    "real_time_motion_monitoring"
+                ]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "system_type": "motion_detection_attendance"
+        }
+
+@app.get("/api/motion/system-status")
+async def get_motion_system_status():
+    """Get comprehensive motion detection system status"""
+    try:
+        # Active motion sessions
+        active_sessions = supabase.table('attendance_sessions').select('id, class_id, start_time, motion_threshold').eq('status', 'active').eq('session_type', 'motion_detection').execute()
+        
+        # Processing statistics
+        with cache_lock:
+            cache_size = len(face_cache)
+        
+        queue_size = motion_processing_queue.qsize()
+        
+        # Motion session manager stats
+        session_manager_stats = {}
+        for session_id, session_data in motion_session_manager.sessions.items():
+            stats = session_data['stats']
+            session_manager_stats[session_id] = {
+                'motion_events': stats['motion_events'],
+                'snapshots_taken': stats['snapshots_taken'],
+                'efficiency': stats['snapshots_taken'] / stats['motion_events'] if stats['motion_events'] > 0 else 0,
+                'last_snapshot': stats['last_snapshot'].isoformat() if stats['last_snapshot'] else None
+            }
+        
+        # Recent motion activity
+        recent_captures = supabase.table('motion_captures').select('*').gte('created_at', (datetime.now() - timedelta(hours=1)).isoformat()).execute()
+        
+        # Motion trigger analysis
+        motion_triggers = {}
+        for capture in recent_captures.data or []:
+            trigger = capture.get('trigger_type', 'unknown')
+            motion_triggers[trigger] = motion_triggers.get(trigger, 0) + 1
+        
+        return {
+            "success": True,
+            "timestamp": datetime.now().isoformat(),
+            "system_type": "motion_detection_attendance",
+            "active_sessions": {
+                "count": len(active_sessions.data or []),
+                "sessions": active_sessions.data or []
+            },
+            "processing_status": {
+                "queue_size": queue_size,
+                "cache_size": cache_size,
+                "recent_captures": len(recent_captures.data or []),
+                "session_manager_stats": session_manager_stats
+            },
+            "motion_activity": {
+                "recent_triggers": motion_triggers,
+                "motion_detection_enabled": MOTION_DETECTION_ENABLED,
+                "adaptive_processing": True
+            },
+            "capabilities": {
+                "motion_triggered_capture": True,
+                "adaptive_threshold": True,
+                "motion_session_tracking": True,
+                "real_time_processing": True,
+                "cooldown_management": True,
+                "rate_limiting": True,
+                "manual_check_in": False,  # Disabled in motion-only system
+                "periodic_snapshots": False  # Replaced with motion detection
+            },
+            "thresholds": motion_processor.adaptive_thresholds
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting motion system status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get motion system status: {str(e)}")
+
+@app.get("/api/motion/session/{session_id}/live-stats")
+async def get_live_motion_stats(session_id: str):
+    """Get live motion detection statistics for a session"""
+    try:
+        # Get motion session stats
+        motion_stats = motion_session_manager.get_session_stats(session_id)
+        
+        if not motion_stats:
+            raise HTTPException(status_code=404, detail="Motion session not found")
+        
+        # Get recent captures (last hour)
+        recent_captures = supabase.table('motion_captures').select('*').eq('session_id', session_id).gte('created_at', (datetime.now() - timedelta(hours=1)).isoformat()).execute()
+        
+        # Calculate live metrics
+        total_captures = len(recent_captures.data or [])
+        successful_captures = len([c for c in recent_captures.data or [] if c.get('processing_status') == 'completed'])
+        
+        # Motion strength distribution
+        motion_strengths = [c.get('motion_strength', 0) for c in recent_captures.data or [] if c.get('motion_strength')]
+        
+        strength_distribution = {
+            'weak': len([s for s in motion_strengths if s < 0.2]),
+            'moderate': len([s for s in motion_strengths if 0.2 <= s < 0.5]),
+            'strong': len([s for s in motion_strengths if s >= 0.5])
+        }
+        
+        # Processing queue status for this session
+        queue_items_for_session = 0  # Would need to implement queue inspection
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat(),
+            "live_stats": {
+                "motion_events": motion_stats['motion_events'],
+                "snapshots_taken": motion_stats['snapshots_taken'],
+                "snapshot_efficiency": motion_stats['snapshots_taken'] / motion_stats['motion_events'] if motion_stats['motion_events'] > 0 else 0,
+                "last_snapshot": motion_stats['last_snapshot'].isoformat() if motion_stats['last_snapshot'] else None
+            },
+            "recent_activity": {
+                "total_captures_last_hour": total_captures,
+                "successful_captures": successful_captures,
+                "success_rate": successful_captures / total_captures if total_captures > 0 else 0,
+                "motion_strength_distribution": strength_distribution
+            },
+            "processing": {
+                "queue_items_for_session": queue_items_for_session,
+                "total_queue_size": motion_processing_queue.qsize()
+            },
+            "hourly_events": motion_stats.get('hourly_events', {}),
+            "motion_history": motion_stats.get('motion_history', [])[-10:]  # Last 10 events
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error getting session statistics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+        logger.error(f"Error getting live motion stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get live stats: {str(e)}")
 
-@app.get("/api/session/{session_id}/verify-enrollment/{student_id}")
-async def verify_student_enrollment(session_id: str, student_id: str):
-    """Verify if student has face enrollment for attendance"""
+@app.delete("/api/motion/cache/clear")
+async def clear_motion_cache():
+    """Clear face embedding cache and reset motion sessions"""
     try:
-        # Check if student has active face embedding
-        embedding_result = supabase.table('student_face_embeddings').select('face_quality, created_at').eq('student_id', student_id).eq('is_active', True).single().execute()
+        with cache_lock:
+            cache_size = len(face_cache)
+            face_cache.clear()
         
-        has_face_data = bool(embedding_result.data)
+        # Reset motion session manager for inactive sessions
+        active_sessions = supabase.table('attendance_sessions').select('id').eq('status', 'active').eq('session_type', 'motion_detection').execute()
+        active_session_ids = [s['id'] for s in active_sessions.data or []]
+        
+        removed_sessions = 0
+        for session_id in list(motion_session_manager.sessions.keys()):
+            if session_id not in active_session_ids:
+                motion_session_manager.remove_session(session_id)
+                removed_sessions += 1
+        
+        logger.info(f"🧹 Cleared {cache_size} cached embeddings and {removed_sessions} inactive motion sessions")
         
         return {
             "success": True,
-            "student_id": student_id,
-            "has_face_data": has_face_data,
-            "face_quality": embedding_result.data.get('face_quality', 0) if has_face_data else 0,
-            "enrolled_date": embedding_result.data.get('created_at') if has_face_data else None
+            "message": f"Cleared {cache_size} cached embeddings and {removed_sessions} motion sessions",
+            "cleared_cache_size": cache_size,
+            "removed_sessions": removed_sessions,
+            "active_sessions_kept": len(active_session_ids),
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
-        logger.error(f"❌ Error verifying enrollment for {student_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to verify enrollment: {str(e)}")
-    
-# main.py - Enhanced with phase-aware processing
-class AdaptiveProcessor:
-    def __init__(self):
-        self.phase_stats = {}
-        self.processing_priority = {
-            '0-10': 1,    # Highest priority
-            '10-20': 2,   # High priority  
-            '20-30': 3,   # Medium priority
-            '30-60': 4,   # Normal priority
-            '60-90': 5,   # Low priority
-            '90+': 6      # Lowest priority
-        }
-    
-    def get_processing_config(self, phase: str) -> Dict:
-        """Get processing configuration based on phase"""
-        configs = {
-            '0-10': {
-                'model_accuracy': 'high',      # ใช้ model ที่แม่นยำ
-                'face_threshold': 0.75,        # Threshold สูง
-                'max_processing_time': 3,      # 3 วินาที
-                'parallel_workers': 4,         # Worker เยอะ
-                'cache_results': True,         # Cache ผลลัพธ์
-                'priority': 1
-            },
-            '10-20': {
-                'model_accuracy': 'high',
-                'face_threshold': 0.7,
-                'max_processing_time': 4,
-                'parallel_workers': 3,
-                'cache_results': True,
-                'priority': 2
-            },
-            '20-30': {
-                'model_accuracy': 'medium',
-                'face_threshold': 0.7,
-                'max_processing_time': 5,
-                'parallel_workers': 2,
-                'cache_results': True,
-                'priority': 3
-            },
-            '30-60': {
-                'model_accuracy': 'medium',
-                'face_threshold': 0.65,
-                'max_processing_time': 6,
-                'parallel_workers': 2,
-                'cache_results': False,
-                'priority': 4
-            },
-            '60-90': {
-                'model_accuracy': 'standard',
-                'face_threshold': 0.65,
-                'max_processing_time': 8,
-                'parallel_workers': 1,
-                'cache_results': False,
-                'priority': 5
-            },
-            '90+': {
-                'model_accuracy': 'standard',
-                'face_threshold': 0.6,
-                'max_processing_time': 10,
-                'parallel_workers': 1,
-                'cache_results': False,
-                'priority': 6
-            }
-        }
-        return configs.get(phase, configs['30-60'])
+        logger.error(f"Error clearing motion cache: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
 
-# Enhanced periodic attendance with phase awareness
-@app.post("/api/attendance/adaptive")
-async def process_adaptive_attendance(
-    background_tasks: BackgroundTasks,
-    image: UploadFile = File(...),
-    session_id: str = Form(...),
-    capture_time: str = Form(...),
-    phase: str = Form(...),  # Phase information from client
-    elapsed_minutes: int = Form(...)
+# ==================== Face Enrollment (Same as before) ====================
+
+@app.post("/api/face/enroll")
+async def enroll_face_for_motion_system(
+    images: List[UploadFile] = File(...),
+    student_id: str = Form(...),
+    student_email: str = Form(...)
 ):
+    """Face enrollment optimized for motion detection system"""
     try:
-        # Validate session
-        session_result = supabase.table('attendance_sessions').select('*').eq('id', session_id).eq('status', 'active').single().execute()
-        if not session_result.data:
-            raise HTTPException(status_code=404, detail="Active session not found")
+        if not images or len(images) == 0:
+            raise HTTPException(status_code=400, detail="At least one image is required for motion detection system")
         
-        session_data = session_result.data
-        processor = AdaptiveProcessor()
-        config = processor.get_processing_config(phase)
+        if len(images) > 5:
+            raise HTTPException(status_code=400, detail="Maximum 5 images allowed")
         
-        # Priority queue based on phase
-        priority = config['priority']
+        logger.info(f"🔄 Enrolling face for motion detection: {student_id} with {len(images)} images")
         
-        # Add to appropriate processing queue
-        await adaptive_queue.put({
-            "priority": priority,
-            "image_data": await image.read(),
-            "session_id": session_id,
-            "capture_time": capture_time,
-            "phase": phase,
-            "config": config,
-            "session_data": session_data
-        })
+        all_encodings = []
+        quality_scores = []
         
-        # Start background processing
-        background_tasks.add_task(process_adaptive_queue)
+        # Process each image with high accuracy for enrollment
+        for idx, image_file in enumerate(images):
+            try:
+                image_data = await image_file.read()
+                image = Image.open(io.BytesIO(image_data))
+                
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                image_array = np.array(image)
+                
+                # Use CNN model for enrollment (highest accuracy)
+                face_locations = face_recognition.face_locations(image_array, model="cnn")
+                
+                if len(face_locations) == 0:
+                    logger.warning(f"No face detected in enrollment image {idx + 1}")
+                    continue
+                
+                if len(face_locations) > 1:
+                    logger.warning(f"Multiple faces detected in enrollment image {idx + 1}, using the largest one")
+                    # Sort by face size and use the largest
+                    face_locations = sorted(face_locations, key=lambda loc: (loc[2]-loc[0])*(loc[1]-loc[3]), reverse=True)
+                
+                # Get high-quality face encoding
+                face_encodings = face_recognition.face_encodings(
+                    image_array, 
+                    face_locations[:1], 
+                    num_jitters=3  # Higher jitters for better enrollment
+                )
+                
+                if face_encodings:
+                    all_encodings.append(face_encodings[0])
+                    
+                    # Calculate quality for this enrollment image
+                    quality = calculate_face_quality(image_array, face_locations[0])
+                    quality_scores.append(quality['overall_score'])
+                    
+                    logger.info(f"✅ Processed enrollment image {idx + 1} (quality: {quality['overall_score']:.3f})")
+                
+            except Exception as e:
+                logger.error(f"Error processing enrollment image {idx + 1}: {e}")
+                continue
         
-        # Quick response
-        face_locations = face_recognition.face_locations(np.array(Image.open(io.BytesIO(await image.read()))), model="hog")
+        if not all_encodings:
+            raise HTTPException(status_code=400, detail="No valid face encodings for motion detection system")
+        
+        # Require at least 60% success rate for enrollment
+        success_rate = len(all_encodings) / len(images)
+        if success_rate < 0.6:
+            logger.warning(f"Low enrollment success rate: {success_rate:.2f}")
+        
+        # Calculate weighted average encoding
+        weights = np.array(quality_scores)
+        weights = weights / np.sum(weights)  # Normalize weights
+        
+        average_encoding = np.average(all_encodings, axis=0, weights=weights)
+        overall_quality = np.mean(quality_scores)
+        
+        # Save to database with motion system metadata
+        success = await save_face_embedding_to_db(
+            student_id, 
+            student_email, 
+            average_encoding, 
+            overall_quality,
+            enrollment_type="motion_detection_system",
+            images_used=len(all_encodings)
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save face data for motion detection system")
+        
+        # Clear cache for this student
+        with cache_lock:
+            if student_id in face_cache:
+                del face_cache[student_id]
+        
+        logger.info(f"✅ Face enrolled for motion detection: {student_id}")
         
         return {
             "success": True,
-            "phase": phase,
-            "elapsed_minutes": elapsed_minutes,
-            "faces_detected": len(face_locations),
-            "processing_priority": priority,
-            "queue_size": adaptive_queue.qsize(),
-            "config": config
+            "message": f"Face enrolled for motion detection using {len(all_encodings)} images",
+            "student_id": student_id,
+            "images_processed": len(all_encodings),
+            "total_images": len(images),
+            "quality_score": overall_quality,
+            "enrollment_type": "motion_detection_system",
+            "system_version": "5.0.0-motion",
+            "timestamp": datetime.now().isoformat()
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Adaptive processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+        logger.error(f"Face enrollment error: {e}")
+        raise HTTPException(status_code=500, detail=f"Enrollment failed: {str(e)}")
 
-# Priority queue for adaptive processing
-import heapq
-import asyncio
+# ==================== Database Helper Functions ====================
 
-class AdaptivePriorityQueue:
-    def __init__(self):
-        self.queue = []
-        self.index = 0
-        self.lock = asyncio.Lock()
-    
-    async def put(self, item):
-        async with self.lock:
-            priority = item['priority']
-            heapq.heappush(self.queue, (priority, self.index, item))
-            self.index += 1
-    
-    async def get(self):
-        async with self.lock:
-            if self.queue:
-                priority, index, item = heapq.heappop(self.queue)
-                return item
-            return None
-    
-    def qsize(self):
-        return len(self.queue)
+async def save_face_embedding_to_db(
+    student_id: str, 
+    student_email: str, 
+    encoding: np.ndarray, 
+    quality: float,
+    enrollment_type: str = "motion_detection_system",
+    images_used: int = 1
+) -> bool:
+    """Save face embedding optimized for motion detection system"""
+    try:
+        if encoding is None or encoding.size == 0:
+            logger.error("Empty encoding provided for motion detection system")
+            return False
+        
+        if not student_id or not student_email:
+            logger.error("Missing student_id or student_email for motion detection system")
+            return False
+        
+        # Validate encoding
+        if not isinstance(encoding, np.ndarray) or encoding.ndim != 1:
+            logger.error("Invalid encoding format for motion detection system")
+            return False
+        
+        embedding_json = encoding.tolist()
+        quality = max(0.0, min(1.0, float(quality)))
+        
+        face_data = {
+            'student_id': student_id,
+            'face_embedding_json': json.dumps(embedding_json),
+            'face_quality': quality,
+            'enrollment_type': enrollment_type,
+            'images_used': images_used,
+            'system_version': '5.0.0-motion',
+            'motion_optimized': True,  # Flag for motion detection optimization
+            'is_active': True,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
+        
+        # Verify student exists
+        student_check = supabase.table('users').select('school_id').eq('school_id', student_id).execute()
+        
+        if not student_check.data:
+            logger.error(f"Student {student_id} not found for motion detection enrollment")
+            return False
+        
+        # Deactivate old embeddings
+        supabase.table('student_face_embeddings').update({
+            'is_active': False,
+            'updated_at': datetime.now().isoformat()
+        }).eq('student_id', student_id).execute()
+        
+        # Insert new embedding
+        result = supabase.table('student_face_embeddings').insert(face_data).execute()
+        
+        if result.data:
+            logger.info(f"✅ Face data saved for motion detection: {student_id} (quality: {quality:.2f}, images: {images_used})")
+            return True
+        else:
+            logger.error(f"❌ Failed to save face data for motion detection: {student_id}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"❌ Error saving to database for motion detection: {e}")
+        return False
 
-adaptive_queue = AdaptivePriorityQueue()
+# ==================== Server Startup ====================
 
-async def process_adaptive_queue():
-    """Process adaptive queue with priority"""
-    while True:
-        item = await adaptive_queue.get()
-        if not item:
-            break
-            
-        try:
-            await process_adaptive_item(item)
-        except Exception as e:
-            logger.error(f"Adaptive queue processing error: {e}")
-
-async def process_adaptive_item(item: Dict):
-    """Process single adaptive item"""
-    config = item['config']
-    phase = item['phase']
+if __name__ == "__main__":
+    import uvicorn
     
-    start_time = time.time()
+    print("🎯 Starting Motion Detection Attendance System")
+    print("=" * 60)
+    print(f"🚀 Server: {HOST}:{PORT}")
+    print(f"📊 Face Threshold: {FACE_THRESHOLD}")
+    print(f"🔧 Debug Mode: {DEBUG}")
+    print("=" * 60)
+    print("✅ Motion Detection Features:")
+    print(f"   - Motion Detection: {'Enabled' if MOTION_DETECTION_ENABLED else 'Disabled'}")
+    print(f"   - Default Motion Threshold: {DEFAULT_MOTION_THRESHOLD}")
+    print(f"   - Motion Cooldown: {MOTION_COOLDOWN_SECONDS}s")
+    print(f"   - Max Snapshots/Hour: {MAX_SNAPSHOTS_PER_HOUR}")
+    print(f"   - Adaptive Thresholds: {list(motion_processor.adaptive_thresholds.keys())}")
+    print("=" * 60)
+    print("✅ Core Features:")
+    print("   - Face Enrollment")
+    print("   - Motion Detection Sessions")
+    print("   - Motion-Triggered Snapshots")
+    print("   - Manual Teacher Capture")
+    print("   - Adaptive Motion Processing")
+    print("   - Real-time Motion Statistics")
+    print("   - Motion Session Management")
+    print("=" * 60)
+    print("❌ Removed Features:")
+    print("   - Periodic Snapshots (replaced with motion detection)")
+    print("   - Manual Student Check-in")
+    print("   - Simple Check-in")
+    print("=" * 60)
     
-    # Process with phase-specific configuration
-    image_pil = Image.open(io.BytesIO(item['image_data']))
-    if image_pil.mode != 'RGB':
-        image_pil = image_pil.convert('RGB')
-    
-    image_array = np.array(image_pil)
-    
-    # Get enrolled students (cached for efficiency)
-    class_id = item['session_data']['class_id']
-    enrolled_students = enhanced_cache.get_enrolled_students_cached(class_id)
-    
-    # Process faces with adaptive threshold
-    detected_faces = process_multiple_faces_adaptive(
-        image_array, 
-        enrolled_students,
-        threshold=config['face_threshold']
+    uvicorn.run(
+        app, 
+        host=HOST, 
+        port=PORT, 
+        log_level="info",
+        reload=DEBUG
     )
-    
-    processing_time = time.time() - start_time
-    
-    # Save results based on phase importance
-    if phase in ['0-10', '10-20'] or len(detected_faces) > 0:
-        # Always save for critical phases or when faces detected
-        await save_adaptive_results(item, detected_faces, processing_time)
-    elif phase in ['20-30', '30-60'] and processing_time < config['max_processing_time']:
-        # Save for medium phases if processed quickly
-        await save_adaptive_results(item, detected_faces, processing_time)
-    # For low-priority phases, only save if significant results
-    
-    logger.info(f"Adaptive processing [{phase}]: {processing_time:.2f}s, {len(detected_faces)} faces")

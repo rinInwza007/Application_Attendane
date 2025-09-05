@@ -452,7 +452,7 @@ class _TeacherAttendanceManagementScreenState extends State<TeacherAttendanceMan
   Widget _buildCameraPreview() {
     return Card(
       margin: const EdgeInsets.all(16),
-      child: Container(
+      child: SizedBox(
         height: 200,
         child: _isCameraReady && _cameraService.controller != null
             ? ClipRRect(

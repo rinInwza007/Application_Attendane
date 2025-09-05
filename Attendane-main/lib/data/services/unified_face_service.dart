@@ -361,7 +361,7 @@ class UnifiedFaceService {
         }
       }
       
-      print('✅ Image preprocessed to ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}');
+      print('✅ Image preprocessed to ${MODEL_INPUT_SIZE}x$MODEL_INPUT_SIZE');
       return inputBuffer;
       
     } catch (e) {

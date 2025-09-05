@@ -272,7 +272,7 @@ class UnifiedCameraService {
       // Web: อ่านเป็น bytes แล้วสร้าง path
       final bytes = await imageFile.readAsBytes();
       final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final String fileName = 'capture_${timestamp}.jpg';
+      final String fileName = 'capture_$timestamp.jpg';
       
       // Web จะเก็บใน memory หรือ IndexedDB
       // สำหรับ demo ใช้ temporary path
@@ -291,7 +291,7 @@ class UnifiedCameraService {
     try {
       final Directory appDir = await getApplicationDocumentsDirectory();
       final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final String fileName = 'capture_${timestamp}.jpg';
+      final String fileName = 'capture_$timestamp.jpg';
       final String savedPath = path.join(appDir.path, 'captures', fileName);
       
       // Ensure directory exists
